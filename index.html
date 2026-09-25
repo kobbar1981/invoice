@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ריכוז חשבוניות חודשי</title>
 
+    <link rel="manifest" href="manifest.json">
+
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-title" content="חשבוניות">
@@ -60,6 +62,7 @@
 
         .credit-badge { color: #d9534f; font-weight: bold; }
         .credit-row { background-color: #fff5f5; }
+        .supplier-summary-card { background: #fdfefe; border: 1px solid #d6eaf8; border-radius: 8px; padding: 10px; margin-top: 8px; }
     </style>
 </head>
 <body>
@@ -128,9 +131,21 @@
             </div>
         </div>
 
+        <!-- אזור חדש: סיכום רכישות לפי ספק -->
+        <div class="card">
+            <h3 style="margin-top:0;">📦 סיכום רכישות ופריטים לפי ספק</h3>
+            <div class="form-group">
+                <label>בחר ספק לצפייה בפירוט המוצרים שנקנו ממנו החודש:</label>
+                <select id="supplierSummarySelect" onchange="renderSupplierSummary()">
+                    <option value="">-- בחר ספק --</option>
+                </select>
+            </div>
+            <div id="supplierSummaryDisplay" class="supplier-summary-card hidden"></div>
+        </div>
+
         <!-- אזור חיפוש וסיכום פריטים -->
         <div class="card">
-            <h3 style="margin-top:0;">🔍 סיכום וחיפוש פריטים שנקנו</h3>
+            <h3 style="margin-top:0;">🔍 חיפוש פריט חופשי</h3>
             <div style="display:flex; gap:6px;">
                 <input type="text" id="itemSearchQuery" placeholder="הקלד שם מוצר/פריט (לדוגמה: חלב, דג, נייר)...">
                 <button onclick="searchAndSummarizeItems()" style="width:auto; background-color:#27ae60; white-space:nowrap;">חפש פריט</button>
@@ -171,7 +186,7 @@
         </div>
     </div>
 
-    <!-- אלמנט נסתר להפקת PDF A4 -->
+    <!-- אלמנט להפקת PDF A4 -->
     <div id="invoicesPdfContainer" style="display:none; background:white; padding:16px; width:210mm; box-sizing:border-box; direction:rtl;">
         <h2 style="text-align:center; font-size:26px; margin-bottom:4px;">סיכום חשבוניות חודשי</h2>
         <div id="invoicesPdfMonthTitle" style="text-align:center; font-size:18px; color:#555; margin-bottom:16px;"></div>
@@ -471,7 +486,6 @@
                 responseText = responseText.replace(/```json/g, "").replace(/```/g, "").trim();
                 const parsed = JSON.parse(responseText);
 
-                // אם סומן כזיכוי ב-AI והסכום חיובי, נהפוך אותו לשלילי
                 if (parsed.isCredit && parsed.amount > 0) {
                     parsed.amount = -Math.abs(parsed.amount);
                 }
@@ -629,6 +643,8 @@
                 snap.forEach(d => monthlyInvoices.push(d.data()));
                 monthlyInvoices.sort((a, b) => (a.supplier || '').localeCompare(b.supplier || '', 'he'));
 
+                populateSupplierSummaryOptions();
+
                 if (monthlyInvoices.length === 0) {
                     tbody.innerHTML = '<tr><td colspan="6" style="color:#888;">אין חשבוניות רשומות לחודש זה.</td></tr>';
                     totalDisplay.innerText = '';
@@ -660,6 +676,92 @@
             } catch(e) {
                 tbody.innerHTML = '<tr><td colspan="6" style="color:red;">שגיאה בטעינת החשבוניות.</td></tr>';
             }
+        };
+
+        // פונקציה לטעינת רשימת הספקים שקיימים בחודש הנוכחי לתפריט הנגלל
+        function populateSupplierSummaryOptions() {
+            const selectEl = document.getElementById('supplierSummarySelect');
+            if (!selectEl) return;
+
+            const uniqueSuppliers = [...new Set(monthlyInvoices.map(i => i.supplier))].sort((a,b)=>a.localeCompare(b,'he'));
+            
+            if (uniqueSuppliers.length === 0) {
+                selectEl.innerHTML = '<option value="">-- אין ספקים בחודש זה --</option>';
+                document.getElementById('supplierSummaryDisplay').classList.add('hidden');
+                return;
+            }
+
+            selectEl.innerHTML = '<option value="">-- בחר ספק לצפייה בפירוט --</option>' +
+                uniqueSuppliers.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('');
+            
+            document.getElementById('supplierSummaryDisplay').classList.add('hidden');
+        }
+
+        // פונקציה להצגת סיכום הפריטים והרכישות של ספק מסוים
+        window.renderSupplierSummary = function() {
+            const selectEl = document.getElementById('supplierSummarySelect');
+            const displayEl = document.getElementById('supplierSummaryDisplay');
+            const selectedSupplier = selectEl.value;
+
+            if (!selectedSupplier) {
+                displayEl.classList.add('hidden');
+                return;
+            }
+
+            const supplierInvoices = monthlyInvoices.filter(i => i.supplier === selectedSupplier);
+            let totalAmount = 0;
+            const itemMap = {};
+
+            supplierInvoices.forEach(inv => {
+                const invAmt = Number(inv.amount) || 0;
+                totalAmount += invAmt;
+                const isCredit = invAmt < 0;
+
+                if (Array.isArray(inv.items)) {
+                    inv.items.forEach(it => {
+                        const itemName = (it.name || 'פריט ללא שם').trim();
+                        let qty = Number(it.quantity) || 1;
+                        let price = Number(it.price) || 0;
+
+                        if (isCredit) {
+                            qty = -Math.abs(qty);
+                            price = -Math.abs(price);
+                        }
+
+                        if (!itemMap[itemName]) {
+                            itemMap[itemName] = { quantity: 0, totalPrice: 0 };
+                        }
+                        itemMap[itemName].quantity += qty;
+                        itemMap[itemName].totalPrice += price;
+                    });
+                }
+            });
+
+            const itemsList = Object.keys(itemMap);
+            let itemsHtml = '';
+
+            if (itemsList.length === 0) {
+                itemsHtml = '<p style="color:#666; font-size:0.85em; margin:4px 0;">לא זוהו פריטים בנפרד עבור ספק זה בחודש הנבחר.</p>';
+            } else {
+                itemsHtml = itemsList.map(name => {
+                    const data = itemMap[name];
+                    return `<div style="padding:4px 0; border-bottom:1px dashed #e0e0e0; font-size:0.85em;">
+                        • <b>${esc(name)}</b> - כמות מצטברת: <b>${data.quantity}</b> ${data.totalPrice !== 0 ? '| עלות: <b>' + data.totalPrice.toFixed(2) + ' ₪</b>' : ''}
+                    </div>`;
+                }).join('');
+            }
+
+            displayEl.innerHTML = `
+                <h4 style="margin:0 0 6px 0; color:#1877f2;">סיכום עבור: ${esc(selectedSupplier)}</h4>
+                <div style="font-size:0.9em; font-weight:bold; margin-bottom:8px;">
+                    מספר חשבוניות: ${supplierInvoices.length} | סה"כ לתשלום נטו: <span style="color:${totalAmount < 0 ? '#d9534f' : '#27ae60'};">${totalAmount.toFixed(2)} ₪</span>
+                </div>
+                <div style="background:white; border:1px solid #e0e0e0; border-radius:6px; padding:8px; max-height:200px; overflow-y:auto;">
+                    <div style="font-size:0.8em; font-weight:bold; color:#555; margin-bottom:4px;">פירוט מוצרים מצטבר:</div>
+                    ${itemsHtml}
+                </div>
+            `;
+            displayEl.classList.remove('hidden');
         };
 
         // חיפוש וסיכום פריטים תוך התחשבות בזיכויים
@@ -714,6 +816,7 @@
             }
         };
 
+        // הפקת דוח PDF מותאמת לדפדפנים בנייד
         window.exportInvoicesToPDF = async function() {
             if (monthlyInvoices.length === 0) { alert("אין חשבוניות לחודש הנבחר כדי להפיק דוח."); return; }
 
@@ -751,6 +854,13 @@
 
             const exportContainer = document.getElementById('invoicesPdfContainer');
             exportContainer.style.display = 'block';
+            exportContainer.style.position = 'absolute';
+            exportContainer.style.left = '0';
+            exportContainer.style.top = '0';
+            exportContainer.style.zIndex = '-9999';
+
+            // השהייה המאפשרת לדפדפן הנייד לרנדר את ה-DOM לפני הפיכה לתמונה
+            await new Promise(resolve => setTimeout(resolve, 300));
 
             try {
                 const canvas = await html2canvas(exportContainer, { scale: 2, useCORS: true, logging: false });
@@ -772,11 +882,22 @@
                 const y = 8;
 
                 pdf.addImage(imgData, 'JPEG', x, y, imgWidth, imgHeight);
-                pdf.save(`invoices-summary-${monthKey}.pdf`);
+
+                // הורדה בטוחה של קובץ ה-PDF למכשירים ניידים
+                const blob = pdf.output('blob');
+                const blobUrl = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = blobUrl;
+                a.download = `invoices-summary-${monthKey}.pdf`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
             } catch(err) {
-                alert("שגיאה בהפקת ה-PDF.");
+                alert("שגיאה בהפקת ה-PDF: " + err.message);
             } finally {
                 exportContainer.style.display = 'none';
+                exportContainer.style.position = '';
+                exportContainer.style.zIndex = '';
             }
         };
 
