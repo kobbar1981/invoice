@@ -64,6 +64,7 @@
         .credit-row { background-color: #fff5f5; }
         .supplier-summary-card { background: #fdfefe; border: 1px solid #d6eaf8; border-radius: 8px; padding: 10px; margin-top: 8px; }
         .api-key-box { background: #fffde7; border: 1px solid #fff59d; padding: 10px; border-radius: 8px; margin-bottom: 12px; }
+        .duplicate-warning { background: #f8d7da; border: 1px solid #f5c6cb; color: #721c24; padding: 8px; border-radius: 6px; margin-bottom: 8px; font-size: 0.85em; font-weight: bold; text-align: center; }
     </style>
 </head>
 <body>
@@ -106,6 +107,7 @@
 
             <div class="hidden" id="invoiceConfirmForm" style="margin-top:10px;">
                 <h4 id="confirmFormTitle" style="margin-bottom:8px;">אישור וזיהוי חשבונית</h4>
+                <div id="duplicateWarningBox" class="duplicate-warning hidden">⚠️ אזהרה: נראה שחשבונית זו כבר נסרקה ונשמרה במערכת!</div>
                 <p style="font-size:0.8em; color:#555; margin:0 0 8px 0;">בדוק ותקן במידת הצורך לפני השמירה:</p>
                 <div id="invoicePreviewImgWrap" style="text-align:center; margin-bottom:10px;"></div>
                 <div class="form-group">
@@ -113,8 +115,12 @@
                     <select id="invoiceSupplierSelect"></select>
                 </div>
                 <div class="form-group">
-                    <label>סכום לתשלום (₪) - לרשום במינוס עבור זיכוי:</label>
-                    <input type="number" id="invoiceAmountInput" step="0.01" placeholder="0.00 (סכום שלילי להפחתה)">
+                    <label>מספר חשבונית / מסמך:</label>
+                    <input type="text" id="invoiceNumberInput" placeholder="מספר חשבונית (אם קיים)">
+                </div>
+                <div class="form-group">
+                    <label>סכום לתשלום (₪):</label>
+                    <input type="number" id="invoiceAmountInput" step="0.01" placeholder="0.00">
                 </div>
                 <div class="form-group">
                     <label>אמצעי תשלום (בחר או הקלד חופשי):</label>
@@ -172,6 +178,7 @@
                     <thead>
                         <tr>
                             <th>ספק</th>
+                            <th>מס' חשבונית</th>
                             <th>סכום</th>
                             <th>אמצעי תשלום</th>
                             <th>פריטים</th>
@@ -180,7 +187,7 @@
                         </tr>
                     </thead>
                     <tbody id="invoicesTableBody">
-                        <tr><td colspan="6" style="color:#888;">טוען נתונים...</td></tr>
+                        <tr><td colspan="7" style="color:#888;">טוען נתונים...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -330,7 +337,6 @@
                 document.getElementById('lockedView').classList.add('hidden');
                 document.getElementById('mainView').classList.remove('hidden');
                 
-                // טעינת מפתח ה-API השמור
                 const savedKey = localStorage.getItem('invoice_gemini_api_key') || '';
                 if (document.getElementById('geminiApiKeyInput')) {
                     document.getElementById('geminiApiKeyInput').value = savedKey;
@@ -461,7 +467,7 @@
             return canvas.toDataURL('image/jpeg', 0.92).split(',')[1];
         }
 
-        // זיהוי אוטומטי באמצעות Gemini API בדגם המעודכן gemini-3.8-flash
+        // זיהוי אוטומטי ובדיקת כפילויות של חשבונית
         window.handleInvoicePhoto = async function(event) {
             const file = event.target.files && event.target.files[0];
             if (!file) return;
@@ -489,11 +495,12 @@
                     `רשימת הספקים המוכרים במערכת היא: ${JSON.stringify(suppliersList)}. ` +
                     `זהה מהתמונה: ` +
                     `1) שם הספק - נסה להתאים אותו לאחד השמות המדויקים מהרשימה אם מתאים, אחרת החזר את השם כפי שמופיע בחשבונית. ` +
-                    `2) הסכום הסופי לתשלום. דגש חשוב מאוד: אם מדובר ב"חשבונית זיכוי", "מסמך זיכוי", או שהסכום מופיע במינוס או בסוגריים להפחתה - החזר את הסכום כמספר שלילי בלבד (לדוגמה: -150.5)! ` +
-                    `3) אמצעי תשלום אם מצוין (מזומן/אשראי/העברה/צ'ק/זיכוי). ` +
-                    `4) רשימת הפריטים בחשבונית כולל שם הפריט, כמות, ומחיר. ` +
+                    `2) מספר החשבונית או מספר המסמך (אם מופיע). ` +
+                    `3) הסכום הסופי לתשלום. דגש חשוב מאוד: אם מדובר ב"חשבונית זיכוי", "מסמך זיכוי", או שהסכום מופיע במינוס או בסוגריים להפחתה - החזר את הסכום כמספר שלילי בלבד (לדוגמה: -150.5)! ` +
+                    `4) אמצעי תשלום אם מצוין (מזומן/אשראי/העברה/צ'ק/זיכוי). ` +
+                    `5) רשימת הפריטים בחשבונית כולל שם הפריט, כמות, ומחיר. ` +
                     `החזר אך ורק אובייקט JSON תקין במבנה הבא: ` +
-                    `{"supplier": "...", "amount": 0, "isCredit": false, "paymentMethod": "...", "items": [{"name": "שם המוצר", "quantity": 1, "price": 0}]}`;
+                    `{"supplier": "...", "invoiceNumber": "...", "amount": 0, "isCredit": false, "paymentMethod": "...", "items": [{"name": "שם המוצר", "quantity": 1, "price": 0}]}`;
 
                 const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
 
@@ -541,12 +548,16 @@
             const formTitle = document.getElementById('confirmFormTitle');
             const saveBtn = document.getElementById('saveInvoiceBtn');
             const itemsDisplay = document.getElementById('invoiceItemsDisplay');
+            const duplicateBox = document.getElementById('duplicateWarningBox');
 
             renderSupplierSelect();
             const supplierSel = document.getElementById('invoiceSupplierSelect');
+            const numberInput = document.getElementById('invoiceNumberInput');
             const amountInput = document.getElementById('invoiceAmountInput');
             const paymentInput = document.getElementById('invoicePaymentMethodInput');
             const notesInput = document.getElementById('invoiceNotesInput');
+
+            duplicateBox.classList.add('hidden');
 
             if (existingInvoice) {
                 editingInvoiceId = existingInvoice.id;
@@ -559,6 +570,7 @@
                 } else {
                     supplierSel.value = '__other__';
                 }
+                numberInput.value = existingInvoice.invoiceNumber || '';
                 amountInput.value = existingInvoice.amount ?? '';
                 paymentInput.value = existingInvoice.paymentMethod ?? '';
                 notesInput.value = existingInvoice.notes ?? '';
@@ -584,9 +596,25 @@
                     notesInput.value = '';
                 }
 
+                numberInput.value = (recognized && recognized.invoiceNumber) ? recognized.invoiceNumber : '';
                 amountInput.value = (recognized && typeof recognized.amount === 'number') ? recognized.amount : '';
                 paymentInput.value = (recognized && recognized.paymentMethod) ? recognized.paymentMethod : '';
                 recognizedItemsList = (recognized && Array.isArray(recognized.items)) ? recognized.items : [];
+
+                // בדיקת כפילויות מול החשבוניות הקיימות בחודש
+                if (recognized) {
+                    const isDuplicate = monthlyInvoices.some(inv => {
+                        const sameSupplier = inv.supplier === recognized.supplier;
+                        const sameAmount = Math.abs((Number(inv.amount) || 0) - (Number(recognized.amount) || 0)) < 0.01;
+                        const sameNum = recognized.invoiceNumber && inv.invoiceNumber && (String(inv.invoiceNumber).trim() === String(recognized.invoiceNumber).trim());
+                        return sameSupplier && (sameNum || sameAmount);
+                    });
+
+                    if (isDuplicate) {
+                        duplicateBox.classList.remove('hidden');
+                        alert(`⚠️ אזהרה: נראה שחשבונית זו נסרקה כבר בעבר!\n(ספק: ${recognized.supplier}, סכום: ${recognized.amount} ₪${recognized.invoiceNumber ? ', מס\' חשבונית: ' + recognized.invoiceNumber : ''})`);
+                    }
+                }
             }
 
             if (recognizedItemsList.length > 0) {
@@ -628,6 +656,7 @@
                 }
             }
 
+            const invoiceNumber = document.getElementById('invoiceNumberInput').value.trim();
             const amount = parseFloat(document.getElementById('invoiceAmountInput').value);
             if (isNaN(amount) || amount === 0) { alert("אנא הכנס סכום תקין (אפשר סכום שלילי לזיכוי, אך לא 0)."); return; }
             const paymentMethod = document.getElementById('invoicePaymentMethodInput').value.trim();
@@ -638,7 +667,7 @@
                 const invoiceId = editingInvoiceId || `${Date.now()}_${Math.floor(Math.random()*10000)}`;
                 const isUpdate = Boolean(editingInvoiceId);
                 const invData = {
-                    id: invoiceId, supplier, amount, paymentMethod, notes, monthKey,
+                    id: invoiceId, supplier, invoiceNumber, amount, paymentMethod, notes, monthKey,
                     items: recognizedItemsList
                 };
                 if (!isUpdate) {
@@ -669,7 +698,7 @@
             const monthKey = getSelectedInvoiceMonth();
             const tbody = document.getElementById('invoicesTableBody');
             const totalDisplay = document.getElementById('invoicesTotalDisplay');
-            tbody.innerHTML = '<tr><td colspan="6" style="color:#888;">טוען נתונים...</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="7" style="color:#888;">טוען נתונים...</td></tr>';
 
             try {
                 const q = query(getInvoicesCollection(), where("monthKey", "==", monthKey));
@@ -681,7 +710,7 @@
                 populateSupplierSummaryOptions();
 
                 if (monthlyInvoices.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="6" style="color:#888;">אין חשבוניות רשומות לחודש זה.</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="7" style="color:#888;">אין חשבוניות רשומות לחודש זה.</td></tr>';
                     totalDisplay.innerText = '';
                     return;
                 }
@@ -697,6 +726,7 @@
                     return `
                         <tr class="${isCredit ? 'credit-row' : ''}">
                             <td>${esc(inv.supplier)}</td>
+                            <td>${esc(inv.invoiceNumber || '-')}</td>
                             <td class="${isCredit ? 'credit-badge' : ''}">${amt.toFixed(2)} ₪ ${isCredit ? '(זיכוי)' : ''}</td>
                             <td>${esc(inv.paymentMethod || '-')}</td>
                             <td>${esc(itemsTooltip)}</td>
@@ -709,7 +739,7 @@
                 }).join('');
                 totalDisplay.innerText = `סה"כ נטו לחודש (לאחר זיכויים): ${total.toFixed(2)} ₪ (${monthlyInvoices.length} חשבוניות)`;
             } catch(e) {
-                tbody.innerHTML = '<tr><td colspan="6" style="color:red;">שגיאה בטעינת החשבוניות.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="7" style="color:red;">שגיאה בטעינת החשבוניות.</td></tr>';
             }
         };
 
