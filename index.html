@@ -63,6 +63,7 @@
         .credit-badge { color: #d9534f; font-weight: bold; }
         .credit-row { background-color: #fff5f5; }
         .supplier-summary-card { background: #fdfefe; border: 1px solid #d6eaf8; border-radius: 8px; padding: 10px; margin-top: 8px; }
+        .api-key-box { background: #fffde7; border: 1px solid #fff59d; padding: 10px; border-radius: 8px; margin-bottom: 12px; }
     </style>
 </head>
 <body>
@@ -79,6 +80,17 @@
 
     <!-- מסך ראשי -->
     <div class="hidden" id="mainView">
+        
+        <!-- הגדרת מפתח API ל-Gemini -->
+        <div class="card api-key-box">
+            <label>🔑 מפתח Gemini API לסריקת חשבוניות (AI):</label>
+            <div style="display:flex; gap:6px;">
+                <input type="password" id="geminiApiKeyInput" placeholder="הדבק מפתח AIzaSy... כאן">
+                <button onclick="saveApiKey()" style="width:auto; background-color:#f39c12; white-space:nowrap;">שמור מפתח</button>
+            </div>
+            <p style="font-size:0.75em; color:#666; margin:4px 0 0 0;">המפתח נשמר בדפדפן שלך בלבד ולא נחשף ל-GitHub.</p>
+        </div>
+
         <div class="card">
             <div class="form-group">
                 <label>חודש פעיל:</label>
@@ -317,8 +329,25 @@
 
                 document.getElementById('lockedView').classList.add('hidden');
                 document.getElementById('mainView').classList.remove('hidden');
+                
+                // טעינת מפתח ה-API השמור
+                const savedKey = localStorage.getItem('invoice_gemini_api_key') || '';
+                if (document.getElementById('geminiApiKeyInput')) {
+                    document.getElementById('geminiApiKeyInput').value = savedKey;
+                }
+
                 initInvoicesModule();
             } catch(e) { alert("שגיאה באימות הסיסמה."); }
+        };
+
+        window.saveApiKey = function() {
+            const val = (document.getElementById('geminiApiKeyInput').value || '').trim();
+            if (!val) {
+                alert("אנא הדבק מפתח API תקין.");
+                return;
+            }
+            localStorage.setItem('invoice_gemini_api_key', val);
+            alert("מפתח ה-API נשמר בהצלחה בטלפון!");
         };
 
         const DEFAULT_SUPPLIERS = [
@@ -437,7 +466,12 @@
             const file = event.target.files && event.target.files[0];
             if (!file) return;
 
-            const GEMINI_API_KEY = "AQ.Ab8RN6JxmCWG1fqWsi8X5PMfa0BFyjVlJHIWhHd9jkz_rkNWTA";
+            const apiKey = localStorage.getItem('invoice_gemini_api_key') || '';
+            if (!apiKey) {
+                alert("אנא הגדר מפתח API תקין בתיבה הצהובה בראש העמוד לפני העלאת חשבוניות.");
+                event.target.value = '';
+                return;
+            }
 
             const recognizingEl = document.getElementById('invoiceRecognizing');
             const confirmForm = document.getElementById('invoiceConfirmForm');
@@ -461,7 +495,7 @@
                     `החזר אך ורק אובייקט JSON תקין במבנה הבא: ` +
                     `{"supplier": "...", "amount": 0, "isCredit": false, "paymentMethod": "...", "items": [{"name": "שם המוצר", "quantity": 1, "price": 0}]}`;
 
-                const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${GEMINI_API_KEY}`;
+                const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
 
                 const response = await fetch(url, {
                     method: "POST",
