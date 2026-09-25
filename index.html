@@ -1,0 +1,786 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ריכוז חשבוניות חודשי</title>
+
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="חשבוניות">
+    <meta name="theme-color" content="#1877f2">
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+
+    <style>
+        body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 8px; background-color: #f0f2f5; color: #1c1e21; overflow-x: hidden; width: 100%; box-sizing: border-box; }
+        h1, h2, h3, h4 { color: #050505; margin-top: 0; text-align: center; }
+        .card { background: white; padding: 12px; border-radius: 10px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 12px; box-sizing: border-box; max-width: 100%; overflow: hidden; }
+        .form-group { margin-bottom: 10px; max-width: 100%; }
+        label { display: block; margin-bottom: 4px; font-weight: 600; font-size: 0.85em; }
+
+        input:not([type="checkbox"]), select, textarea, button {
+            padding: 9px;
+            font-size: 14px;
+            border: 1px solid #ccd0d5;
+            border-radius: 6px;
+            width: 100%;
+            box-sizing: border-box;
+            font-family: inherit;
+        }
+
+        button { background-color: #1877f2; color: white; border: none; font-weight: bold; cursor: pointer; margin-top: 5px; box-sizing: border-box; }
+        button:hover { opacity: 0.9; }
+        button:disabled { opacity: 0.6; cursor: wait; }
+
+        .table-wrapper { overflow-x: auto; width: 100%; max-width: 900px; margin: 0 auto; box-sizing: border-box; }
+        table { width: 100%; border-collapse: collapse; margin-top: 8px; box-sizing: border-box; }
+        th, td { border: 1px solid #ddd; padding: 6px 4px; text-align: center; vertical-align: middle; box-sizing: border-box; }
+        th { background-color: #34495e; color: white; font-size: 0.8em; padding: 8px 3px; }
+        td { font-size: 0.8em; padding: 6px 3px; }
+
+        .delete-btn { background-color: #ff4d4d; width: auto; padding: 4px 8px; font-size: 0.8em; }
+        .edit-btn { background-color: #f39c12; width: auto; padding: 4px 8px; font-size: 0.8em; margin-left: 4px; }
+        .pdf-btn { background-color: #e74c3c; }
+        .modal-actions { display: flex; gap: 8px; margin-top: 14px; }
+        .modal-actions button { margin-top: 0; flex: 1; }
+        .hidden { display: none !important; }
+        .restaurant-tag { text-align: center; font-size: 0.8em; color: #555; margin-bottom: 6px; }
+
+        .supplier-manage-item { display: flex; justify-content: space-between; align-items: center; background: #f8f9fa; border: 1px solid #eee; border-radius: 6px; padding: 6px 8px; margin-bottom: 4px; font-size: 0.85em; }
+        #invoiceRecognizing { padding: 10px; background: #eef5ff; border-radius: 8px; margin-top: 8px; text-align: center; }
+        #invoicesPdfContainer table th, #invoicesPdfContainer table td { text-align: right; }
+        #invoiceConfirmForm { border: 1px solid #ddd; border-radius: 8px; padding: 10px; background: #f8f9fa; }
+        #lockedView { text-align: center; padding-top: 60px; }
+
+        .items-list-box { background: #fff; border: 1px solid #ccc; border-radius: 6px; padding: 8px; margin-top: 6px; font-size: 0.85em; max-height: 150px; overflow-y: auto; }
+        .search-results-box { background: #eef7ed; border: 1px solid #c3e6cb; border-radius: 6px; padding: 10px; margin-top: 10px; font-size: 0.9em; }
+
+        .credit-badge { color: #d9534f; font-weight: bold; }
+        .credit-row { background-color: #fff5f5; }
+    </style>
+</head>
+<body>
+
+    <div class="restaurant-tag" id="restaurantTag"></div>
+    <h1>ריכוז חשבוניות חודשי</h1>
+
+    <!-- מסך נעילה -->
+    <div class="card" id="lockedView">
+        <h2>גישה מוגבלת למנהל</h2>
+        <p style="font-size:0.9em; color:#555;">האפליקציה משתמשת באותה סיסמת מנהל כמו במערכת הסידורים.</p>
+        <button onclick="unlockApp()" style="background-color:#27ae60; max-width:260px; margin:0 auto;">כניסה</button>
+    </div>
+
+    <!-- מסך ראשי -->
+    <div class="hidden" id="mainView">
+        <div class="card">
+            <div class="form-group">
+                <label>חודש פעיל:</label>
+                <input type="month" id="invoiceMonthSelect">
+            </div>
+
+            <div class="form-group">
+                <label>📷 צלם / העלה חשבונית (תמונה או PDF):</label>
+                <input type="file" accept="image/*,application/pdf" capture="environment" id="invoicePhotoInput">
+            </div>
+
+            <div class="hidden" id="invoiceRecognizing">🔎 מזהה פריטים, זיכויים ונתונים בחשבונית באמצעות AI, רגע בבקשה...</div>
+
+            <div class="hidden" id="invoiceConfirmForm" style="margin-top:10px;">
+                <h4 id="confirmFormTitle" style="margin-bottom:8px;">אישור וזיהוי חשבונית</h4>
+                <p style="font-size:0.8em; color:#555; margin:0 0 8px 0;">בדוק ותקן במידת הצורך לפני השמירה:</p>
+                <div id="invoicePreviewImgWrap" style="text-align:center; margin-bottom:10px;"></div>
+                <div class="form-group">
+                    <label>ספק:</label>
+                    <select id="invoiceSupplierSelect"></select>
+                </div>
+                <div class="form-group">
+                    <label>סכום לתשלום (₪) - לרשום במינוס עבור זיכוי:</label>
+                    <input type="number" id="invoiceAmountInput" step="0.01" placeholder="0.00 (סכום שלילי להפחתה)">
+                </div>
+                <div class="form-group">
+                    <label>אמצעי תשלום (בחר או הקלד חופשי):</label>
+                    <input type="text" id="invoicePaymentMethodInput" list="paymentMethodsList" placeholder="מזומן / אשראי / העברה בנקאית / צ'ק...">
+                    <datalist id="paymentMethodsList">
+                        <option value="אשראי">
+                        <option value="מזומן">
+                        <option value="העברה בנקאית">
+                        <option value="צ'ק">
+                        <option value="הוראת קבע">
+                        <option value="זיכוי / ניכוי">
+                    </datalist>
+                </div>
+                <div class="form-group">
+                    <label>פריטים שזוהו בחשבונית:</label>
+                    <div id="invoiceItemsDisplay" class="items-list-box">טרם זוהו פריטים</div>
+                </div>
+                <div class="form-group">
+                    <label>הערות (ניתן לרשום הערה ידנית):</label>
+                    <input type="text" id="invoiceNotesInput" placeholder="הקלד הערה חופשית/ידנית לחשבונית...">
+                </div>
+                <div class="modal-actions">
+                    <button id="saveInvoiceBtn" onclick="saveInvoiceEntry()" style="background-color:#27ae60;">שמור חשבונית</button>
+                    <button onclick="cancelInvoiceEntry()" style="background-color:#7f8c8d;">ביטול</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- אזור חיפוש וסיכום פריטים -->
+        <div class="card">
+            <h3 style="margin-top:0;">🔍 סיכום וחיפוש פריטים שנקנו</h3>
+            <div style="display:flex; gap:6px;">
+                <input type="text" id="itemSearchQuery" placeholder="הקלד שם מוצר/פריט (לדוגמה: חלב, דג, נייר)...">
+                <button onclick="searchAndSummarizeItems()" style="width:auto; background-color:#27ae60; white-space:nowrap;">חפש פריט</button>
+            </div>
+            <div id="itemSearchResults" class="hidden search-results-box"></div>
+        </div>
+
+        <div class="card">
+            <h3 style="margin-top:0;">חשבוניות החודש הנבחר:</h3>
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>ספק</th>
+                            <th>סכום</th>
+                            <th>אמצעי תשלום</th>
+                            <th>פריטים</th>
+                            <th>הערות</th>
+                            <th>פעולות</th>
+                        </tr>
+                    </thead>
+                    <tbody id="invoicesTableBody">
+                        <tr><td colspan="6" style="color:#888;">טוען נתונים...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <div id="invoicesTotalDisplay" style="text-align:center; font-weight:bold; margin-top:8px; font-size:1.05em; color:#1877f2;"></div>
+            <button class="pdf-btn" style="margin-top:14px;" onclick="exportInvoicesToPDF()">🖨️ הפק דוח A4 לחודש (PDF)</button>
+        </div>
+
+        <div class="card">
+            <h3 style="margin-top:0;">ניהול רשימת ספקים:</h3>
+            <div style="display:flex; gap:6px;">
+                <input type="text" id="newSupplierNameInput" placeholder="שם ספק חדש...">
+                <button onclick="addSupplierToList()" style="width:auto; background-color:#3498db; white-space:nowrap;">הוסף</button>
+            </div>
+            <div id="supplierListManage" style="margin-top:10px;"></div>
+        </div>
+    </div>
+
+    <!-- אלמנט נסתר להפקת PDF A4 -->
+    <div id="invoicesPdfContainer" style="display:none; background:white; padding:16px; width:210mm; box-sizing:border-box; direction:rtl;">
+        <h2 style="text-align:center; font-size:26px; margin-bottom:4px;">סיכום חשבוניות חודשי</h2>
+        <div id="invoicesPdfMonthTitle" style="text-align:center; font-size:18px; color:#555; margin-bottom:16px;"></div>
+        <table style="width:100%; border-collapse:collapse;">
+            <thead>
+                <tr style="background:#f5f6f7;">
+                    <th style="border:1px solid #999; padding:8px; font-size:16px; text-align:right;">שם הספק</th>
+                    <th style="border:1px solid #999; padding:8px; font-size:16px; text-align:right;">סכום לתשלום / זיכוי</th>
+                    <th style="border:1px solid #999; padding:8px; font-size:16px; text-align:right;">אמצעי תשלום</th>
+                    <th style="border:1px solid #999; padding:8px; font-size:16px; text-align:right;">הערות</th>
+                </tr>
+            </thead>
+            <tbody id="invoicesPdfTableBody"></tbody>
+            <tfoot>
+                <tr>
+                    <td style="border:1px solid #999; padding:8px; font-weight:bold; font-size:17px;">סה"כ לתשלום נטו</td>
+                    <td id="invoicesPdfTotalCell" style="border:1px solid #999; padding:8px; font-weight:bold; font-size:17px;"></td>
+                    <td style="border:1px solid #999;"></td>
+                    <td style="border:1px solid #999;"></td>
+                </tr>
+            </tfoot>
+        </table>
+    </div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+        import { getFirestore, collection, doc, setDoc, getDoc, getDocs, deleteDoc, onSnapshot, query, where } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyASfsSMXS62ehM1kVSjOpudOEUGUh37BYI",
+            authDomain: "work-schedule-17c39.firebaseapp.com",
+            projectId: "work-schedule-17c39",
+            storageBucket: "work-schedule-17c39.firebasestorage.app",
+            messagingSenderId: "708640197618",
+            appId: "1:708640197618:web:c3731ecf7c7ef80fd3396b"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+
+        if (window.pdfjsLib) {
+            window.pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+        }
+
+        function sanitizeRestaurantId(raw) {
+            const cleaned = String(raw || '').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
+            return cleaned || '';
+        }
+
+        let RESTAURANT_ID = '';
+
+        function getSettingsDoc(docName) { return doc(db, `${RESTAURANT_ID}_settings`, docName); }
+        function getInvoicesCollection() { return collection(db, `${RESTAURANT_ID}_invoices`); }
+
+        function esc(value) {
+            return String(value ?? '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function bytesToHex(buf) {
+            return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+        }
+        function hexToBytes(hex) {
+            const out = new Uint8Array(hex.length / 2);
+            for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.substr(i * 2, 2), 16);
+            return out;
+        }
+        async function hashPassword(pass, saltHex) {
+            const enc = new TextEncoder();
+            const keyMaterial = await crypto.subtle.importKey("raw", enc.encode(pass), "PBKDF2", false, ["deriveBits"]);
+            const bits = await crypto.subtle.deriveBits(
+                { name: "PBKDF2", salt: hexToBytes(saltHex), iterations: 150000, hash: "SHA-256" },
+                keyMaterial, 256
+            );
+            return bytesToHex(bits);
+        }
+        const LEGACY_DEFAULT_PASSWORD = "1212";
+
+        function updateRestaurantTag() {
+            const tagEl = document.getElementById('restaurantTag');
+            if (tagEl) tagEl.textContent = RESTAURANT_ID ? `עסק: ${RESTAURANT_ID}` : '';
+        }
+
+        function initRestaurantId() {
+            const fromUrl = sanitizeRestaurantId(new URLSearchParams(window.location.search).get('r'));
+            let fromStorage = '';
+            try { fromStorage = sanitizeRestaurantId(localStorage.getItem('work_schedule_restaurant_id')); } catch(e){}
+            RESTAURANT_ID = fromUrl || fromStorage || '';
+            updateRestaurantTag();
+
+            if (!RESTAURANT_ID) {
+                document.getElementById('lockedView').innerHTML =
+                    `<h2>לא זוהה עסק</h2><p style="font-size:0.9em; color:#555;">פתח את האפליקציה מהקישור שקיבלת ממערכת הסידורים, או היכנס דרך הדפדפן שבו כבר נכנסת לסידור.</p>`;
+                return false;
+            }
+            return true;
+        }
+
+        window.unlockApp = async function() {
+            if (!RESTAURANT_ID) return;
+            let cfg = null;
+            try {
+                const docSnap = await getDoc(getSettingsDoc("manager_config"));
+                if (docSnap.exists()) cfg = docSnap.data();
+            } catch(e) {
+                alert("שגיאה בחיבור לשרת.");
+                return;
+            }
+
+            const rawPass = prompt("הכנס סיסמת מנהל:");
+            if (rawPass === null) return;
+            const pass = rawPass.trim();
+
+            try {
+                let ok = false;
+                if (cfg && cfg.passwordHash && cfg.salt) {
+                    ok = (await hashPassword(pass, cfg.salt)) === cfg.passwordHash;
+                } else if (cfg && cfg.password) {
+                    ok = (pass === String(cfg.password));
+                } else {
+                    ok = (pass === LEGACY_DEFAULT_PASSWORD);
+                }
+                if (!ok) { alert("סיסמה שגויה!"); return; }
+
+                document.getElementById('lockedView').classList.add('hidden');
+                document.getElementById('mainView').classList.remove('hidden');
+                initInvoicesModule();
+            } catch(e) { alert("שגיאה באימות הסיסמה."); }
+        };
+
+        const DEFAULT_SUPPLIERS = [
+            "אמיגה", "אבי-קדו", "בכור שיווק דגים", "קורניש", "מזרח ומערב", "קוקה קולה",
+            "סגלוביץ", "דים סאם", "ג'ומון", "וונג שו", "מ.ר כלים", "שונות", "א.ב שיווק בשר",
+            "ישראכרט", "הוט", "שופרסל", "איתן עמיחי", "נט לאנצ'", "אמות השקעות", "סופר גז",
+            "בזק", "חשמל", "מים וארנונה", "משגיח", "תן ביס", "סיבוס", "וולט", "משלוחה",
+            "גודי", "sfd", "יוחאי קירור", "בלקו", "פיני גז", "אינוויס 4 מי"
+        ];
+
+        let suppliersList = DEFAULT_SUPPLIERS.slice();
+        let monthlyInvoices = [];
+        let recognizedImageBase64 = null;
+        let recognizedItemsList = [];
+        let editingInvoiceId = null;
+
+        function getCurrentMonthKey() {
+            const d = new Date();
+            return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+        }
+        function getSelectedInvoiceMonth() {
+            const el = document.getElementById('invoiceMonthSelect');
+            return (el && el.value) ? el.value : getCurrentMonthKey();
+        }
+
+        function initInvoicesModule() {
+            const monthInput = document.getElementById('invoiceMonthSelect');
+            if (monthInput) {
+                monthInput.value = getCurrentMonthKey();
+                monthInput.addEventListener('change', loadInvoicesForMonth);
+            }
+            const photoInput = document.getElementById('invoicePhotoInput');
+            if (photoInput) photoInput.addEventListener('change', handleInvoicePhoto);
+
+            onSnapshot(getSettingsDoc("suppliers_list"), (snap) => {
+                if (snap.exists() && Array.isArray(snap.data().suppliers)) {
+                    suppliersList = snap.data().suppliers;
+                } else {
+                    suppliersList = DEFAULT_SUPPLIERS.slice();
+                    setDoc(getSettingsDoc("suppliers_list"), { suppliers: suppliersList }).catch(()=>{});
+                }
+                renderSupplierSelect();
+                renderSupplierManageList();
+            });
+
+            loadInvoicesForMonth();
+        }
+
+        function renderSupplierSelect() {
+            const sel = document.getElementById('invoiceSupplierSelect');
+            if (!sel) return;
+            const prevVal = sel.value;
+            sel.innerHTML = suppliersList.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('')
+                + `<option value="__other__">אחר / לא ברשימה...</option>`;
+            if (prevVal && suppliersList.includes(prevVal)) sel.value = prevVal;
+        }
+
+        function renderSupplierManageList() {
+            const container = document.getElementById('supplierListManage');
+            if (!container) return;
+            if (suppliersList.length === 0) {
+                container.innerHTML = '<p style="color:#888; font-size:0.85em;">אין ספקים ברשימה.</p>';
+                return;
+            }
+            container.innerHTML = suppliersList.map(s => `
+                <div class="supplier-manage-item">
+                    <span>${esc(s)}</span>
+                    <button class="delete-btn" data-name="${esc(s)}" onclick="removeSupplierFromList(this.dataset.name)">הסר</button>
+                </div>`).join('');
+        }
+
+        window.addSupplierToList = async function() {
+            const input = document.getElementById('newSupplierNameInput');
+            const name = (input.value || '').trim();
+            if (!name) { alert("אנא הכנס שם ספק."); return; }
+            if (suppliersList.includes(name)) { alert("הספק כבר קיים ברשימה."); return; }
+            suppliersList.push(name);
+            try {
+                await setDoc(getSettingsDoc("suppliers_list"), { suppliers: suppliersList });
+                input.value = '';
+            } catch(e) { alert("שגיאה בהוספת הספק."); }
+        };
+
+        window.removeSupplierFromList = async function(name) {
+            if (!confirm(`להסיר את "${name}" מרשימת הספקים?`)) return;
+            suppliersList = suppliersList.filter(s => s !== name);
+            try {
+                await setDoc(getSettingsDoc("suppliers_list"), { suppliers: suppliersList });
+            } catch(e) { alert("שגיאה בהסרת הספק."); }
+        };
+
+        function fileToBase64(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(reader.result.split(',')[1]);
+                reader.onerror = reject;
+                reader.readAsDataURL(file);
+            });
+        }
+
+        async function pdfFileToImageBase64(file) {
+            const arrayBuffer = await file.arrayBuffer();
+            const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+            const page = await pdf.getPage(1);
+            const viewport = page.getViewport({ scale: 2 });
+            const canvas = document.createElement('canvas');
+            canvas.width = viewport.width;
+            canvas.height = viewport.height;
+            const ctx = canvas.getContext('2d');
+            await page.render({ canvasContext: ctx, viewport }).promise;
+            return canvas.toDataURL('image/jpeg', 0.92).split(',')[1];
+        }
+
+        // זיהוי אוטומטי של החשבוניות + זיהוי זיכוי וסכום מינוס
+        window.handleInvoicePhoto = async function(event) {
+            const file = event.target.files && event.target.files[0];
+            if (!file) return;
+
+            const recognizingEl = document.getElementById('invoiceRecognizing');
+            const confirmForm = document.getElementById('invoiceConfirmForm');
+            confirmForm.classList.add('hidden');
+            recognizingEl.classList.remove('hidden');
+
+            try {
+                const isPdf = (file.type === 'application/pdf') || /\.pdf$/i.test(file.name || '');
+                const base64Data = isPdf ? await pdfFileToImageBase64(file) : await fileToBase64(file);
+                const mediaTypeForApi = isPdf ? 'image/jpeg' : (file.type || 'image/jpeg');
+                recognizedImageBase64 = `data:${mediaTypeForApi};base64,${base64Data}`;
+
+                const promptText =
+                    `זוהי תמונה של חשבונית/קבלה/חשבונית זיכוי מספק למסעדה. ` +
+                    `רשימת הספקים המוכרים במערכת היא: ${JSON.stringify(suppliersList)}. ` +
+                    `זהה מהתמונה: ` +
+                    `1) שם הספק - נסה להתאים אותו לאחד השמות המדויקים מהרשימה אם מתאים, אחרת החזר את השם כפי שמופיע בחשבונית. ` +
+                    `2) הסכום הסופי לתשלום. דגש חשוב מאוד: אם מדובר ב"חשבונית זיכוי", "מסמך זיכוי", או שהסכום מופיע במינוס או בסוגריים להפחתה - החזר את הסכום כמספר שלילי בלבד (לדוגמה: -150.5)! ` +
+                    `3) אמצעי תשלום אם מצוין (מזומן/אשראי/העברה/צ'ק/זיכוי). ` +
+                    `4) רשימת הפריטים בחשבונית כולל שם הפריט, כמות, ומחיר. ` +
+                    `החזר אך ורק אובייקט JSON תקין במבנה הבא: ` +
+                    `{"supplier": "...", "amount": 0, "isCredit": false, "paymentMethod": "...", "items": [{"name": "שם המוצר", "quantity": 1, "price": 0}]}`;
+
+                const GEMINI_API_KEY = "AQ.Ab8RN6LAzYP3yROfgxQkSWaA-y8GOwnvyl_jeSv2rPTCG8R4fA";
+                const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${GEMINI_API_KEY}`;
+
+                const response = await fetch(url, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        contents: [{
+                            parts: [
+                                { text: promptText },
+                                { inlineData: { mimeType: mediaTypeForApi, data: base64Data } }
+                            ]
+                        }]
+                    })
+                });
+
+                const data = await response.json();
+
+                if (data.error) throw new Error(`שגיאה מגוגל (${data.error.code}): ${data.error.message}`);
+                if (!data.candidates || !data.candidates[0]?.content?.parts?.[0]?.text) {
+                    throw new Error("התקבלה תשובה ריקה מה-AI");
+                }
+
+                let responseText = data.candidates[0].content.parts[0].text;
+                responseText = responseText.replace(/```json/g, "").replace(/```/g, "").trim();
+                const parsed = JSON.parse(responseText);
+
+                // אם סומן כזיכוי ב-AI והסכום חיובי, נהפוך אותו לשלילי
+                if (parsed.isCredit && parsed.amount > 0) {
+                    parsed.amount = -Math.abs(parsed.amount);
+                }
+
+                openInvoiceConfirmForm(parsed, null);
+            } catch (err) {
+                alert("פירוט השגיאה: " + err.message);
+                openInvoiceConfirmForm(null, null);
+            } finally {
+                recognizingEl.classList.add('hidden');
+                event.target.value = '';
+            }
+        };
+
+        function openInvoiceConfirmForm(recognized, existingInvoice = null) {
+            const confirmForm = document.getElementById('invoiceConfirmForm');
+            const imgWrap = document.getElementById('invoicePreviewImgWrap');
+            const formTitle = document.getElementById('confirmFormTitle');
+            const saveBtn = document.getElementById('saveInvoiceBtn');
+            const itemsDisplay = document.getElementById('invoiceItemsDisplay');
+
+            renderSupplierSelect();
+            const supplierSel = document.getElementById('invoiceSupplierSelect');
+            const amountInput = document.getElementById('invoiceAmountInput');
+            const paymentInput = document.getElementById('invoicePaymentMethodInput');
+            const notesInput = document.getElementById('invoiceNotesInput');
+
+            if (existingInvoice) {
+                editingInvoiceId = existingInvoice.id;
+                if (formTitle) formTitle.innerText = "עריכת חשבונית קיימת";
+                if (saveBtn) saveBtn.innerText = "עדכן חשבונית";
+                imgWrap.innerHTML = '';
+
+                if (suppliersList.includes(existingInvoice.supplier)) {
+                    supplierSel.value = existingInvoice.supplier;
+                } else {
+                    supplierSel.value = '__other__';
+                }
+                amountInput.value = existingInvoice.amount ?? '';
+                paymentInput.value = existingInvoice.paymentMethod ?? '';
+                notesInput.value = existingInvoice.notes ?? '';
+                recognizedItemsList = existingInvoice.items || [];
+            } else {
+                editingInvoiceId = null;
+                if (formTitle) formTitle.innerText = "אישור וזיהוי חשבונית";
+                if (saveBtn) saveBtn.innerText = "שמור חשבונית";
+
+                imgWrap.innerHTML = recognizedImageBase64
+                    ? `<img src="${recognizedImageBase64}" style="max-width:100%; max-height:220px; border-radius:8px; border:1px solid #ddd;">`
+                    : '';
+
+                if (recognized && recognized.supplier) {
+                    if (suppliersList.includes(recognized.supplier)) {
+                        supplierSel.value = recognized.supplier;
+                        notesInput.value = recognized.amount < 0 ? 'חשבונית זיכוי' : '';
+                    } else {
+                        supplierSel.value = '__other__';
+                        notesInput.value = `ספק שזוהה (לא ברשימה): ${recognized.supplier}` + (recognized.amount < 0 ? ' [חשבונית זיכוי]' : '');
+                    }
+                } else {
+                    notesInput.value = '';
+                }
+
+                amountInput.value = (recognized && typeof recognized.amount === 'number') ? recognized.amount : '';
+                paymentInput.value = (recognized && recognized.paymentMethod) ? recognized.paymentMethod : '';
+                recognizedItemsList = (recognized && Array.isArray(recognized.items)) ? recognized.items : [];
+            }
+
+            if (recognizedItemsList.length > 0) {
+                itemsDisplay.innerHTML = recognizedItemsList.map(it =>
+                    `• <b>${esc(it.name)}</b> - כמות: ${esc(it.quantity || 1)}${it.price ? ' (' + it.price + ' ₪)' : ''}`
+                ).join('<br>');
+            } else {
+                itemsDisplay.innerText = "לא זוהו פריטים בנפרד.";
+            }
+
+            confirmForm.classList.remove('hidden');
+            confirmForm.scrollIntoView({ behavior: 'smooth' });
+        }
+
+        window.editInvoiceEntry = function(invoiceId) {
+            const inv = monthlyInvoices.find(i => i.id === invoiceId);
+            if (!inv) return;
+            recognizedImageBase64 = null;
+            openInvoiceConfirmForm(null, inv);
+        };
+
+        window.cancelInvoiceEntry = function() {
+            document.getElementById('invoiceConfirmForm').classList.add('hidden');
+            recognizedImageBase64 = null;
+            recognizedItemsList = [];
+            editingInvoiceId = null;
+        };
+
+        window.saveInvoiceEntry = async function() {
+            const supplierSel = document.getElementById('invoiceSupplierSelect');
+            let supplier = supplierSel.value;
+            if (supplier === '__other__') {
+                const custom = prompt("הכנס את שם הספק:");
+                if (!custom || !custom.trim()) { alert("אנא הכנס שם ספק."); return; }
+                supplier = custom.trim();
+                if (!suppliersList.includes(supplier)) {
+                    suppliersList.push(supplier);
+                    try { await setDoc(getSettingsDoc("suppliers_list"), { suppliers: suppliersList }); } catch(e){}
+                }
+            }
+
+            const amount = parseFloat(document.getElementById('invoiceAmountInput').value);
+            if (isNaN(amount) || amount === 0) { alert("אנא הכנס סכום תקין (אפשר סכום שלילי לזיכוי, אך לא 0)."); return; }
+            const paymentMethod = document.getElementById('invoicePaymentMethodInput').value.trim();
+            const notes = document.getElementById('invoiceNotesInput').value.trim();
+            const monthKey = getSelectedInvoiceMonth();
+
+            try {
+                const invoiceId = editingInvoiceId || `${Date.now()}_${Math.floor(Math.random()*10000)}`;
+                const isUpdate = Boolean(editingInvoiceId);
+                const invData = {
+                    id: invoiceId, supplier, amount, paymentMethod, notes, monthKey,
+                    items: recognizedItemsList
+                };
+                if (!isUpdate) {
+                    invData.createdAt = Date.now();
+                } else {
+                    invData.updatedAt = Date.now();
+                }
+
+                await setDoc(doc(getInvoicesCollection(), invoiceId), invData, { merge: true });
+                document.getElementById('invoiceConfirmForm').classList.add('hidden');
+                recognizedImageBase64 = null;
+                recognizedItemsList = [];
+                editingInvoiceId = null;
+                alert(isUpdate ? "החשבונית עודכנה בהצלחה!" : "החשבונית נשמרה בהצלחה!");
+                loadInvoicesForMonth();
+            } catch(e) { alert("שגיאה בשמירת החשבונית."); }
+        };
+
+        window.deleteInvoiceEntry = async function(invoiceId) {
+            if (!confirm("למחוק את החשבונית הזו?")) return;
+            try {
+                await deleteDoc(doc(getInvoicesCollection(), invoiceId));
+                loadInvoicesForMonth();
+            } catch(e) { alert("שגיאה במחיקת החשבונית."); }
+        };
+
+        window.loadInvoicesForMonth = async function() {
+            const monthKey = getSelectedInvoiceMonth();
+            const tbody = document.getElementById('invoicesTableBody');
+            const totalDisplay = document.getElementById('invoicesTotalDisplay');
+            tbody.innerHTML = '<tr><td colspan="6" style="color:#888;">טוען נתונים...</td></tr>';
+
+            try {
+                const q = query(getInvoicesCollection(), where("monthKey", "==", monthKey));
+                const snap = await getDocs(q);
+                monthlyInvoices = [];
+                snap.forEach(d => monthlyInvoices.push(d.data()));
+                monthlyInvoices.sort((a, b) => (a.supplier || '').localeCompare(b.supplier || '', 'he'));
+
+                if (monthlyInvoices.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="6" style="color:#888;">אין חשבוניות רשומות לחודש זה.</td></tr>';
+                    totalDisplay.innerText = '';
+                    return;
+                }
+
+                let total = 0;
+                tbody.innerHTML = monthlyInvoices.map(inv => {
+                    const amt = Number(inv.amount) || 0;
+                    total += amt;
+                    const isCredit = amt < 0;
+                    const itemsCount = Array.isArray(inv.items) ? inv.items.length : 0;
+                    const itemsTooltip = itemsCount > 0 ? `${itemsCount} פריטים` : '-';
+                    
+                    return `
+                        <tr class="${isCredit ? 'credit-row' : ''}">
+                            <td>${esc(inv.supplier)}</td>
+                            <td class="${isCredit ? 'credit-badge' : ''}">${amt.toFixed(2)} ₪ ${isCredit ? '(זיכוי)' : ''}</td>
+                            <td>${esc(inv.paymentMethod || '-')}</td>
+                            <td>${esc(itemsTooltip)}</td>
+                            <td>${esc(inv.notes || '-')}</td>
+                            <td style="white-space:nowrap;">
+                                <button class="edit-btn" data-id="${esc(inv.id)}" onclick="editInvoiceEntry(this.dataset.id)">ערוך</button>
+                                <button class="delete-btn" data-id="${esc(inv.id)}" onclick="deleteInvoiceEntry(this.dataset.id)">מחק</button>
+                            </td>
+                        </tr>`;
+                }).join('');
+                totalDisplay.innerText = `סה"כ נטו לחודש (לאחר זיכויים): ${total.toFixed(2)} ₪ (${monthlyInvoices.length} חשבוניות)`;
+            } catch(e) {
+                tbody.innerHTML = '<tr><td colspan="6" style="color:red;">שגיאה בטעינת החשבוניות.</td></tr>';
+            }
+        };
+
+        // חיפוש וסיכום פריטים תוך התחשבות בזיכויים
+        window.searchAndSummarizeItems = function() {
+            const queryText = (document.getElementById('itemSearchQuery').value || '').trim().toLowerCase();
+            const resultsBox = document.getElementById('itemSearchResults');
+
+            if (!queryText) {
+                alert("אנא הקלד שם פריט לחיפוש.");
+                return;
+            }
+
+            let totalQuantity = 0;
+            let totalCost = 0;
+            let matchDetails = [];
+
+            monthlyInvoices.forEach(inv => {
+                const invoiceAmount = Number(inv.amount) || 0;
+                const isCreditInvoice = invoiceAmount < 0;
+
+                if (Array.isArray(inv.items)) {
+                    inv.items.forEach(it => {
+                        if (it.name && it.name.toLowerCase().includes(queryText)) {
+                            let qty = Number(it.quantity) || 1;
+                            let price = Number(it.price) || 0;
+
+                            if (isCreditInvoice) {
+                                qty = -Math.abs(qty);
+                                price = -Math.abs(price);
+                            }
+
+                            totalQuantity += qty;
+                            totalCost += price;
+                            matchDetails.push(`• ספק: <b>${esc(inv.supplier)}</b> | כמות: ${qty} | מחיר: ${price !== 0 ? price.toFixed(2) + ' ₪' : 'לא מצוין'}${isCreditInvoice ? ' (זיכוי)' : ''}`);
+                        }
+                    });
+                }
+            });
+
+            resultsBox.classList.remove('hidden');
+            if (matchDetails.length === 0) {
+                resultsBox.innerHTML = `לא נמצאו פריטים תואמים ל-"<b>${esc(queryText)}</b>" בחודש הנבחר.`;
+            } else {
+                resultsBox.innerHTML = `
+                    <b>תוצאות עבור "${esc(queryText)}":</b><br>
+                    • סה"כ יחידות/כמות שנרכשה נטו: <b>${totalQuantity}</b><br>
+                    ${totalCost !== 0 ? '• סה"כ עלות פריטים אלו נטו: <b>' + totalCost.toFixed(2) + ' ₪</b><br>' : ''}
+                    <hr style="border:0; border-top:1px solid #ccc; margin:6px 0;">
+                    <b>פירוט הרכישות והזיכויים:</b><br>
+                    ${matchDetails.join('<br>')}
+                `;
+            }
+        };
+
+        window.exportInvoicesToPDF = async function() {
+            if (monthlyInvoices.length === 0) { alert("אין חשבוניות לחודש הנבחר כדי להפיק דוח."); return; }
+
+            const monthKey = getSelectedInvoiceMonth();
+            const [y, m] = monthKey.split('-');
+            const monthNames = ['ינואר','פברואר','מרץ','אפריל','מאי','יוני','יולי','אוגוסט','ספטמבר','אוקטובר','נובמבר','דצמבר'];
+            document.getElementById('invoicesPdfMonthTitle').innerText = `חודש: ${monthNames[parseInt(m)-1]} ${y}`;
+
+            const bySupplier = {};
+            monthlyInvoices.forEach(inv => {
+                if (!bySupplier[inv.supplier]) bySupplier[inv.supplier] = { amount: 0, methods: new Set(), notes: [] };
+                bySupplier[inv.supplier].amount += Number(inv.amount) || 0;
+                if (inv.paymentMethod) bySupplier[inv.supplier].methods.add(inv.paymentMethod);
+                if (inv.notes) bySupplier[inv.supplier].notes.push(inv.notes);
+            });
+
+            const orderedNames = [...suppliersList.filter(s => bySupplier[s]), ...Object.keys(bySupplier).filter(s => !suppliersList.includes(s))];
+
+            let total = 0;
+            const rowsHtml = orderedNames.map(name => {
+                const info = bySupplier[name];
+                total += info.amount;
+                const isCredit = info.amount < 0;
+                return `
+                    <tr>
+                        <td style="border:1px solid #999; padding:7px; font-size:14px;">${esc(name)}</td>
+                        <td style="border:1px solid #999; padding:7px; font-size:14px; ${isCredit ? 'color:red; font-weight:bold;' : ''}">${info.amount.toFixed(2)} ₪ ${isCredit ? '(זיכוי)' : ''}</td>
+                        <td style="border:1px solid #999; padding:7px; font-size:14px;">${esc(Array.from(info.methods).join(', ') || '-')}</td>
+                        <td style="border:1px solid #999; padding:7px; font-size:14px;">${esc(info.notes.join(' | ') || '-')}</td>
+                    </tr>`;
+            }).join('');
+
+            document.getElementById('invoicesPdfTableBody').innerHTML = rowsHtml;
+            document.getElementById('invoicesPdfTotalCell').innerText = `${total.toFixed(2)} ₪`;
+
+            const exportContainer = document.getElementById('invoicesPdfContainer');
+            exportContainer.style.display = 'block';
+
+            try {
+                const canvas = await html2canvas(exportContainer, { scale: 2, useCORS: true, logging: false });
+                const imgData = canvas.toDataURL('image/jpeg', 0.95);
+                const { jsPDF } = window.jspdf;
+                const pdf = new jsPDF('p', 'mm', 'a4');
+                const pageWidth = pdf.internal.pageSize.getWidth();
+                const pageHeight = pdf.internal.pageSize.getHeight();
+
+                let imgWidth = pageWidth - 16;
+                let imgHeight = (canvas.height * imgWidth) / canvas.width;
+
+                if (imgHeight > pageHeight - 16) {
+                    imgHeight = pageHeight - 16;
+                    imgWidth = (canvas.width * imgHeight) / canvas.height;
+                }
+
+                const x = (pageWidth - imgWidth) / 2;
+                const y = 8;
+
+                pdf.addImage(imgData, 'JPEG', x, y, imgWidth, imgHeight);
+                pdf.save(`invoices-summary-${monthKey}.pdf`);
+            } catch(err) {
+                alert("שגיאה בהפקת ה-PDF.");
+            } finally {
+                exportContainer.style.display = 'none';
+            }
+        };
+
+        initRestaurantId();
+    </script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+{
+  "name": "ניהול חשבוניות",
+  "short_name": "חשבוניות",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f0f2f5",
+  "theme_color": "#1877f2",
+  "share_target": {
+    "action": "./",
+    "method": "GET",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "url": "url"
+    },
+    "enctype": "multipart/form-data",
+    "files": [
+      {
+        "name": "invoice_file",
+        "accept": ["image/*", "application/pdf"]
+      }
+    ]
+  }
+}
