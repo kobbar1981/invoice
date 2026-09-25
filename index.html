@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ריכוז חשבוניות חודשי</title>
+    <title>ניהול חשבוניות חודשי</title>
 
     <link rel="manifest" href="manifest.json">
 
@@ -72,17 +72,27 @@
         
         .editable-cell input { border: 1px solid transparent; background: transparent; text-align: center; width: 100%; font-size: inherit; padding: 4px; }
         .editable-cell input:focus { border: 1px solid #1877f2; background: #fff; border-radius: 4px; outline: none; }
+
+        /* מודאל מצלמה חיה */
+        #cameraModalOverlay {
+            position: fixed; inset: 0; background: #000; z-index: 9999;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+        }
+        #cameraModalOverlay video { width: 100%; height: auto; max-height: 75vh; background: #000; }
+        #cameraModalControls { display: flex; gap: 10px; width: 100%; max-width: 480px; padding: 12px; box-sizing: border-box; }
+        #cameraModalControls button { margin-top: 0; }
+        #cameraModalError { color: #fff; background: #c0392b; padding: 10px; border-radius: 8px; margin: 12px; text-align: center; font-size: 0.9em; }
     </style>
 </head>
 <body>
 
     <div class="restaurant-tag" id="restaurantTag"></div>
-    <h1>ריכוז חשבוניות חודשי</h1>
+    <h1>מערכת ניהול חשבוניות חודשי</h1>
 
     <!-- מסך נעילה -->
     <div class="card" id="lockedView">
-        <h2>גישה מוגבלת למנהל</h2>
-        <p style="font-size:0.9em; color:#555;">האפליקציה משתמשת באותה סיסמת מנהל כמו במערכת הסידורים.</p>
+        <h2>הגנת סיסמה למנהל</h2>
+        <p style="font-size:0.9em; color:#555;">האפליקציה מוגנת באמצעות סיסמת מנהל לשמירה על הנתונים.</p>
         <button onclick="unlockApp()" style="background-color:#27ae60; max-width:260px; margin:0 auto;">כניסה</button>
     </div>
 
@@ -91,9 +101,9 @@
         
         <!-- הגדרת מפתח API ל-Gemini -->
         <div class="card api-key-box">
-            <label>🔑 מפתח Gemini API לסריקת חשבוניות (AI):</label>
+            <label>🔑 מפתח Gemini API לזיהוי חכם של חשבוניות (AI):</label>
             <div style="display:flex; gap:6px;">
-                <input type="password" id="geminiApiKeyInput" placeholder="הדבק מפתח AIzaSy... כאן">
+                <input type="password" id="geminiApiKeyInput" placeholder="הכנס מפתח AIzaSy... כאן">
                 <button onclick="saveApiKey()" style="width:auto; background-color:#f39c12; white-space:nowrap;">שמור מפתח</button>
             </div>
             <p style="font-size:0.75em; color:#666; margin:4px 0 0 0;">המפתח נשמר בדפדפן שלך בלבד ולא נחשף ל-GitHub.</p>
@@ -101,28 +111,32 @@
 
         <div class="card">
             <div class="form-group">
-                <label>חודש פעיל:</label>
+                <label>בחירת חודש:</label>
                 <input type="month" id="invoiceMonthSelect">
             </div>
 
             <div class="form-group">
-                <label>📷 צלם / העלה חשבונית (תמונה או PDF):</label>
-                <input type="file" accept="image/*,application/pdf" capture="environment" id="invoicePhotoInput">
+                <label>📁 צילום או העלאת חשבונית:</label>
+                <div style="display:flex; gap:6px; margin-top:4px;">
+                    <button type="button" onclick="openCameraModal()" style="background-color:#27ae60; margin-top:0;">📸 צלם עם מצלמה</button>
+                    <button type="button" onclick="document.getElementById('fileUploadInput').click()" style="background-color:#3498db; margin-top:0;">📁 העלה קובץ / תמונה</button>
+                </div>
+                <input type="file" accept="image/*,application/pdf" id="fileUploadInput" class="hidden">
             </div>
 
-            <div class="hidden" id="invoiceRecognizing">🔎 מזהה פריטים, זיכויים ונתונים בחשבונית באמצעות AI, רגע בבקשה...</div>
+            <div class="hidden" id="invoiceRecognizing">⏳ מעבד תמונות, פריטים ונתונים בחשבונית באמצעות פלאגין AI, אנא המתן...</div>
 
             <div class="hidden" id="invoiceConfirmForm" style="margin-top:10px;">
-                <h4 id="confirmFormTitle" style="margin-bottom:8px;">אישור וזיהוי חשבונית</h4>
-                <div id="duplicateWarningBox" class="duplicate-warning hidden">⚠️ אזהרה: נראה שחשבונית זו כבר נסרקה ונשמרה במערכת!</div>
-                <p style="font-size:0.8em; color:#555; margin:0 0 8px 0;">בדוק ותקן במידת הצורך לפני השמירה:</p>
+                <h4 id="confirmFormTitle" style="margin-bottom:8px;">אישור ודייהון חשבונית</h4>
+                <div id="duplicateWarningBox" class="duplicate-warning hidden">⚠️ אזהרה: נראית חשבונית זו כבר קיימת במערכת!</div>
+                <p style="font-size:0.8em; color:#555; margin:0 0 8px 0;">בדוק ועדכן במידת הצורך לפני השמירה:</p>
                 <div id="invoicePreviewImgWrap" style="text-align:center; margin-bottom:10px;"></div>
                 <div class="form-group">
                     <label>ספק:</label>
                     <select id="invoiceSupplierSelect"></select>
                 </div>
                 <div class="form-group">
-                    <label>מספר חשבונית / מסמך:</label>
+                    <label>מספר חשבונית / אסמכתא:</label>
                     <input type="text" id="invoiceNumberInput" placeholder="מספר חשבונית (אם קיים)">
                 </div>
                 <div class="form-group">
@@ -130,24 +144,24 @@
                     <input type="number" id="invoiceAmountInput" step="0.01" placeholder="0.00">
                 </div>
                 <div class="form-group">
-                    <label>אמצעי תשלום (בחר או הקלד חופשי):</label>
-                    <input type="text" id="invoicePaymentMethodInput" list="paymentMethodsList" placeholder="מזומן / אשראי / העברה בנקאית / צ'ק...">
+                    <label>אמצעי תשלום:</label>
+                    <input type="text" id="invoicePaymentMethodInput" list="paymentMethodsList" placeholder="בחר או הקלד אמצעי תשלום...">
                     <datalist id="paymentMethodsList">
-                        <option value="אשראי">
-                        <option value="מזומן">
-                        <option value="העברה בנקאית">
-                        <option value="צ'ק">
-                        <option value="הוראת קבע">
-                        <option value="זיכוי / ניכוי">
+                        <option value="כרטיס אשראי">כרטיס אשראי</option>
+                        <option value="העברה בנקאית">העברה בנקאית</option>
+                        <option value="הוראת קבע">הוראת קבע</option>
+                        <option value="עמלה">עמלה</option>
+                        <option value="צ'ק">צ'ק</option>
+                        <option value="זיכוי">זיכוי</option>
                     </datalist>
                 </div>
                 <div class="form-group">
-                    <label>פריטים שזוהו בחשבונית:</label>
-                    <div id="invoiceItemsDisplay" class="items-list-box">טרם זוהו פריטים</div>
+                    <label>פרטים שזוהו בחשבונית:</label>
+                    <div id="invoiceItemsDisplay" class="items-list-box">טרם זוהו פרטים</div>
                 </div>
                 <div class="form-group">
-                    <label>הערות (ניתן לרשום הערה ידנית):</label>
-                    <input type="text" id="invoiceNotesInput" placeholder="הקלד הערה חופשית/ידנית לחשבונית...">
+                    <label>הערות (ניתן לרשום הערה פנימית):</label>
+                    <input type="text" id="invoiceNotesInput" placeholder="הכללת הערה חודשית/פנימית לחשבונית...">
                 </div>
                 <div class="modal-actions">
                     <button id="saveInvoiceBtn" onclick="saveInvoiceEntry()" style="background-color:#27ae60;">שמור חשבונית</button>
@@ -156,11 +170,11 @@
             </div>
         </div>
 
-        <!-- אזור סיכום רכישות לפי ספק -->
+        <!-- הצגת סיכום חודשי לפי ספק -->
         <div class="card">
-            <h3 style="margin-top:0;">📦 סיכום רכישות ופריטים לפי ספק</h3>
+            <h3 style="margin-top:0;">📊 סיכום חודשי ופרטים לפי ספק</h3>
             <div class="form-group">
-                <label>בחר ספק לצפייה בפירוט המוצרים שנקנו ממנו החודש:</label>
+                <label>בחר ספק להצגת פירוט המוצרים שרכשנו ממנו החודש:</label>
                 <select id="supplierSummarySelect" onchange="renderSupplierSummary()">
                     <option value="">-- בחר ספק --</option>
                 </select>
@@ -168,19 +182,19 @@
             <div id="supplierSummaryDisplay" class="supplier-summary-card hidden"></div>
         </div>
 
-        <!-- אזור חיפוש וסיכום פריטים -->
+        <!-- חיפוש וסיכום פריטים -->
         <div class="card">
-            <h3 style="margin-top:0;">🔍 חיפוש פריט חופשי</h3>
+            <h3 style="margin-top:0;">🔍 חיפוש פריט חודשי</h3>
             <div style="display:flex; gap:6px;">
-                <input type="text" id="itemSearchQuery" placeholder="הקלד שם מוצר/פריט (לדוגמה: חלב, דג, נייר)...">
+                <input type="text" id="itemSearchQuery" placeholder="הכנס שם מוצר/פריט (לדוגמה: חלב, דגים, סלמון)...">
                 <button onclick="searchAndSummarizeItems()" style="width:auto; background-color:#27ae60; white-space:nowrap;">חפש פריט</button>
             </div>
             <div id="itemSearchResults" class="hidden search-results-box"></div>
         </div>
 
-        <!-- רשימת חשבוניות גולמיות -->
+        <!-- טבלת חשבוניות גולמיות -->
         <div class="card">
-            <h3 style="margin-top:0;">חשבוניות סרוקות לחודש הנבחר:</h3>
+            <h3 style="margin-top:0;">חשבוניות שנקלטו לחודש הנוכחי:</h3>
             <div class="table-wrapper">
                 <table>
                     <thead>
@@ -189,7 +203,7 @@
                             <th>מס' חשבונית</th>
                             <th>סכום</th>
                             <th>אמצעי תשלום</th>
-                            <th>פריטים</th>
+                            <th>פרטים</th>
                             <th>הערות</th>
                             <th>פעולות</th>
                         </tr>
@@ -201,10 +215,10 @@
             </div>
         </div>
 
-        <!-- דוח ספקים חודשי אינטראקטיבי לעריכה לפני ייצוא -->
+        <!-- דוח ספקים חודשי אדיטבילי לייצוא -->
         <div class="card" style="border: 2px solid #34495e;">
-            <h3 style="margin-top:0; color:#34495e;">📋 דוח ספקים חודשי מרוכז (ניתן לעריכה ישירה)</h3>
-            <p style="font-size:0.8em; color:#555; text-align:center; margin-top:-4px;">תוכל לערוך שדות ישירות בטבלה זו, והדוחות (PDF / אקסל) יופקו בדיוק לפי השינויים שלך:</p>
+            <h3 style="margin-top:0; color:#34495e;">📋 דוח ספקים חודשי מסוכם (ניתן לעריכה ישירה)</h3>
+            <p style="font-size:0.8em; color:#555; text-align:center; margin-top:-4px;">טבלה זו מסכמת שורה ספציפית, וההורדה (PDF / אקסל) תיווצר בדיוק לפי השינויים כאן:</p>
             <div class="table-wrapper">
                 <table>
                     <thead>
@@ -229,7 +243,7 @@
             </div>
             
             <div class="action-btns-group" style="margin-top:14px;">
-                <button class="pdf-btn" onclick="exportInvoicesToPDF()">🖨️ הפק דוח A4 לחודש (PDF)</button>
+                <button class="pdf-btn" onclick="exportInvoicesToPDF()">📄 הורד דוח A4 לחודש (PDF)</button>
                 <button class="excel-btn" onclick="exportInvoicesToExcel()">📊 ייצוא לאקסל (XLSX)</button>
             </div>
         </div>
@@ -244,7 +258,18 @@
         </div>
     </div>
 
-    <!-- אלמנט להפקת PDF A4 -->
+    <!-- מודאל מצלמה חיה לצילום תמונה בודדת -->
+    <div id="cameraModalOverlay" class="hidden">
+        <video id="cameraModalVideo" autoplay playsinline muted></video>
+        <div id="cameraModalError" class="hidden"></div>
+        <div id="cameraModalControls">
+            <button onclick="capturePhotoFromCamera()" style="background-color:#27ae60;">📸 צלם</button>
+            <button onclick="closeCameraModal()" style="background-color:#7f8c8d;">ביטול</button>
+        </div>
+    </div>
+    <canvas id="cameraModalCanvas" class="hidden"></canvas>
+
+    <!-- אלמנט נסתר להורדת PDF A4 -->
     <div id="invoicesPdfContainer" style="display:block; position:fixed; left:-9999px; top:0; width:210mm; background:white; padding:16px; box-sizing:border-box; direction:rtl;">
         <h2 style="text-align:center; font-size:24px; margin-bottom:4px;">סיכום חשבוניות חודשי</h2>
         <div id="invoicesPdfMonthTitle" style="text-align:center; font-size:16px; color:#555; margin-bottom:16px;"></div>
@@ -332,16 +357,18 @@
             if (tagEl) tagEl.textContent = RESTAURANT_ID ? `עסק: ${RESTAURANT_ID}` : '';
         }
 
+        const DEFAULT_RESTAURANT_ID = 'yoko';
+
         function initRestaurantId() {
             const fromUrl = sanitizeRestaurantId(new URLSearchParams(window.location.search).get('r'));
             let fromStorage = '';
             try { fromStorage = sanitizeRestaurantId(localStorage.getItem('work_schedule_restaurant_id')); } catch(e){}
-            RESTAURANT_ID = fromUrl || fromStorage || '';
+            RESTAURANT_ID = fromUrl || fromStorage || DEFAULT_RESTAURANT_ID;
             updateRestaurantTag();
 
             if (!RESTAURANT_ID) {
                 document.getElementById('lockedView').innerHTML =
-                    `<h2>לא זוהה עסק</h2><p style="font-size:0.9em; color:#555;">פתח את האפליקציה מהקישור שקיבלת ממערכת הסידורים, או היכנס דרך הדפדפן שבו כבר נכנסת לסידור.</p>`;
+                    `<h2>שגיאה בזיהוי עסק</h2><p style="font-size:0.9em; color:#555;">אנא בדוק את הכתובת בשורת הכתובות בדפדפן, או הוסף מזהה עסק תקין בפרמטר.</p>`;
                 return false;
             }
             return true;
@@ -354,11 +381,11 @@
                 const docSnap = await getDoc(getSettingsDoc("manager_config"));
                 if (docSnap.exists()) cfg = docSnap.data();
             } catch(e) {
-                alert("שגיאה בחיבור לשרת.");
+                alert("שגיאה בחיבור לרשת.");
                 return;
             }
 
-            const rawPass = prompt("הכנס סיסמת מנהל:");
+            const rawPass = prompt("הקלד סיסמת מנהל:");
             if (rawPass === null) return;
             const pass = rawPass.trim();
 
@@ -388,19 +415,19 @@
         window.saveApiKey = function() {
             const val = (document.getElementById('geminiApiKeyInput').value || '').trim();
             if (!val) {
-                alert("אנא הדבק מפתח API תקין.");
+                alert("אנא הכנס מפתח API תקין.");
                 return;
             }
             localStorage.setItem('invoice_gemini_api_key', val);
-            alert("מפתח ה-API נשמר בהצלחה בטלפון!");
+            alert("מפתח ה-API נשמר בהצלחה בדפדפן!");
         };
 
         const DEFAULT_SUPPLIERS = [
-            "אמיגה", "אבי-קדו", "בכור שיווק דגים", "קורניש", "מזרח ומערב", "קוקה קולה",
-            "סגלוביץ", "דים סאם", "ג'ומון", "וונג שו", "מ.ר כלים", "שונות", "א.ב שיווק בשר",
-            "ישראכרט", "הוט", "שופרסל", "איתן עמיחי", "נט לאנצ'", "אמות השקעות", "סופר גז",
-            "בזק", "חשמל", "מים וארנונה", "משגיח", "תן ביס", "סיבוס", "וולט", "משלוחה",
-            "גודי", "sfd", "יוחאי קירור", "בלקו", "פיני גז", "אינוויס 4 מי"
+            "אמיגה", "אבי-קדו", "בכור שיווק דגים", "קוקורייצ'ו", "מנצח ומספר", "שטראוס גן",
+            "סגלולייב", "דים סאם", "ג'ומונים", "וולט קור", "מ.ר כליות", "שוריורות", "א.ב שיווק בשר",
+            "יצחקאוטופרסט", "הוד", "שורטסטול", "איטון תעשיות", "נסט לפאש'", "אמוס הרחיצה", "סוופור דגן",
+            "בדיק", "חזמוש", "מים ואנרגיה", "מחזגים", "טין בית", "סיביטוב", "וולטס", "מחזוריות",
+            "גודיי", "sfd", "יוחאי קייצון", "בלקו", "פירי יגן", "אייסווסיו 4 מיי"
         ];
 
         let suppliersList = DEFAULT_SUPPLIERS.slice();
@@ -409,6 +436,67 @@
         let recognizedItemsList = [];
         let editingInvoiceId = null;
         let customReportEdits = {};
+
+        // ---- מודאל מצלמה חיה (getUserMedia) ----
+        let cameraStream = null;
+
+        window.openCameraModal = async function() {
+            const overlay = document.getElementById('cameraModalOverlay');
+            const video = document.getElementById('cameraModalVideo');
+            const errorBox = document.getElementById('cameraModalError');
+            errorBox.classList.add('hidden');
+            errorBox.innerText = '';
+
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                alert("הדפדפן/האפליקציה לא תומכים בגישה למצלמה. נסה להעלות תמונה במקום זאת.");
+                return;
+            }
+
+            overlay.classList.remove('hidden');
+
+            try {
+                cameraStream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: { ideal: "environment" } },
+                    audio: false
+                });
+                video.srcObject = cameraStream;
+            } catch (err) {
+                errorBox.innerText = "לא ניתן לפתוח את המצלמה: " + err.message + " (ודא שהאפליקציה קיבלה הרשאת מצלמה)";
+                errorBox.classList.remove('hidden');
+            }
+        };
+
+        window.closeCameraModal = function() {
+            const overlay = document.getElementById('cameraModalOverlay');
+            const video = document.getElementById('cameraModalVideo');
+            overlay.classList.add('hidden');
+            if (cameraStream) {
+                cameraStream.getTracks().forEach(t => t.stop());
+                cameraStream = null;
+            }
+            video.srcObject = null;
+        };
+
+        window.capturePhotoFromCamera = async function() {
+            const video = document.getElementById('cameraModalVideo');
+            const canvas = document.getElementById('cameraModalCanvas');
+
+            if (!video.videoWidth || !video.videoHeight) {
+                alert("המצלמה עדיין לא מוכנה, נסה שוב עוד רגע.");
+                return;
+            }
+
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+            const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+            const base64Data = dataUrl.split(',')[1];
+
+            closeCameraModal();
+            await processInvoiceImageData(base64Data, 'image/jpeg');
+        };
 
         function getCurrentMonthKey() {
             const d = new Date();
@@ -428,8 +516,9 @@
                     loadInvoicesForMonth();
                 });
             }
-            const photoInput = document.getElementById('invoicePhotoInput');
-            if (photoInput) photoInput.addEventListener('change', handleInvoicePhoto);
+
+            const fileInput = document.getElementById('fileUploadInput');
+            if (fileInput) fileInput.addEventListener('change', (e) => handleInvoiceFile(e, true));
 
             onSnapshot(getSettingsDoc("suppliers_list"), (snap) => {
                 if (snap.exists() && Array.isArray(snap.data().suppliers)) {
@@ -510,14 +599,26 @@
             return canvas.toDataURL('image/jpeg', 0.92).split(',')[1];
         }
 
-        window.handleInvoicePhoto = async function(event) {
+        async function handleInvoiceFile(event, isGeneralUpload) {
             const file = event.target.files && event.target.files[0];
             if (!file) return;
 
+            try {
+                const isPdf = (file.type === 'application/pdf') || /\.pdf$/i.test(file.name || '');
+                const base64Data = isPdf ? await pdfFileToImageBase64(file) : await fileToBase64(file);
+                const mediaTypeForApi = isPdf ? 'image/jpeg' : (file.type || 'image/jpeg');
+                await processInvoiceImageData(base64Data, mediaTypeForApi);
+            } finally {
+                event.target.value = '';
+            }
+        };
+
+        // פונקציה משותפת: מקבלת base64 (בלי הפריפיקס data:) ושולחת לזיהוי AI,
+        // בין אם התמונה הגיעה מהעלאת קובץ ובין אם מצילום ישיר דרך מצלמת המכשיר
+        async function processInvoiceImageData(base64Data, mediaTypeForApi) {
             const apiKey = localStorage.getItem('invoice_gemini_api_key') || '';
             if (!apiKey) {
-                alert("אנא הגדר מפתח API תקין בתיבה הצהובה בראש העמוד לפני העלאת חשבוניות.");
-                event.target.value = '';
+                alert("אנא הגדר מפתח API תקין בהגדרות בראש העמוד בטרם העלאת או צילום חשבונית.");
                 return;
             }
 
@@ -527,21 +628,18 @@
             recognizingEl.classList.remove('hidden');
 
             try {
-                const isPdf = (file.type === 'application/pdf') || /\.pdf$/i.test(file.name || '');
-                const base64Data = isPdf ? await pdfFileToImageBase64(file) : await fileToBase64(file);
-                const mediaTypeForApi = isPdf ? 'image/jpeg' : (file.type || 'image/jpeg');
                 recognizedImageBase64 = `data:${mediaTypeForApi};base64,${base64Data}`;
 
                 const promptText =
-                    `זוהי תמונה של חשבונית/קבלה/חשבונית זיכוי מספק למסעדה. ` +
-                    `רשימת הספקים המוכרים במערכת היא: ${JSON.stringify(suppliersList)}. ` +
+                    `נתח תמונה זו של חשבונית/קבלה/חשבונית זיכוי ספק לעסקים. ` +
+                    `רשימת הספקים המורשים במערכת היא: ${JSON.stringify(suppliersList)}. ` +
                     `זהה מהתמונה: ` +
-                    `1) שם הספק - נסה להתאים אותו לאחד השמות המדויקים מהרשימה אם מתאים, אחרת החזר את השם כפי שמופיע בחשבונית. ` +
-                    `2) מספר החשבונית או מספר המסמך (אם מופיע). ` +
-                    `3) הסכום הסופי לתשלום. דגש חשוב מאוד: אם מדובר ב"חשבונית זיכוי", "מסמך זיכוי", או שהסכום מופיע במינוס או בסוגריים להפחתה - החזר את הסכום כמספר שלילי בלבד (לדוגמה: -150.5)! ` +
-                    `4) אמצעי תשלום אם מצוין (מזומן/אשראי/העברה/צ'ק/זיכוי). ` +
+                    `1) שם הספק. ` +
+                    `2) מספר החשבונית או מספר האסמכתא (אם מופיע). ` +
+                    `3) הסכום הסופי לתשלום (בשקלים). אם מדובר בזיכוי, חלץ כערך שלילי (לדוגמה: -150.5). ` +
+                    `4) אמצעי תשלום. ` +
                     `5) רשימת הפריטים בחשבונית כולל שם הפריט, כמות, ומחיר. ` +
-                    `החזר אך ורק אובייקט JSON תקין במבנה הבא: ` +
+                    `חזיר אך ורק אובייקט JSON תקין במבנה הבא: ` +
                     `{"supplier": "...", "invoiceNumber": "...", "amount": 0, "isCredit": false, "paymentMethod": "...", "items": [{"name": "שם המוצר", "quantity": 1, "price": 0}]}`;
 
                 const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
@@ -561,9 +659,9 @@
 
                 const data = await response.json();
 
-                if (data.error) throw new Error(`שגיאה מגוגל (${data.error.code}): ${data.error.message}`);
+                if (data.error) throw new Error(`שגיאת מודל (${data.error.code}): ${data.error.message}`);
                 if (!data.candidates || !data.candidates[0]?.content?.parts?.[0]?.text) {
-                    throw new Error("התקבלה תשובה ריקה מה-AI");
+                    throw new Error("התשובה התקבלה ריקה מה-AI");
                 }
 
                 let responseText = data.candidates[0].content.parts[0].text;
@@ -580,9 +678,8 @@
                 openInvoiceConfirmForm(null, null);
             } finally {
                 recognizingEl.classList.add('hidden');
-                event.target.value = '';
             }
-        };
+        }
 
         function openInvoiceConfirmForm(recognized, existingInvoice = null) {
             const confirmForm = document.getElementById('invoiceConfirmForm');
@@ -619,7 +716,7 @@
                 recognizedItemsList = existingInvoice.items || [];
             } else {
                 editingInvoiceId = null;
-                if (formTitle) formTitle.innerText = "אישור וזיהוי חשבונית";
+                if (formTitle) formTitle.innerText = "אישור ודייהון חשבונית";
                 if (saveBtn) saveBtn.innerText = "שמור חשבונית";
 
                 imgWrap.innerHTML = recognizedImageBase64
@@ -650,7 +747,7 @@
 
                     if (isDuplicate) {
                         duplicateBox.classList.remove('hidden');
-                        alert(`⚠️ אזהרה: נראה שחשבונית זו נסרקה כבר בעבר!\n(ספק: ${recognized.supplier}, סכום: ${recognized.amount} ₪${recognized.invoiceNumber ? ', מס\' חשבונית: ' + recognized.invoiceNumber : ''})`);
+                        alert(`⚠️ אזהרה: נראית חשבונית זו כבר קיימת במאגר!\n(ספק: ${recognized.supplier}, סכום: ${recognized.amount} ₪${recognized.invoiceNumber ? ', מס\' חשבונית: ' + recognized.invoiceNumber : ''})`);
                     }
                 }
             }
@@ -660,7 +757,7 @@
                     `• <b>${esc(it.name)}</b> - כמות: ${esc(it.quantity || 1)}${it.price ? ' (' + it.price + ' ₪)' : ''}`
                 ).join('<br>');
             } else {
-                itemsDisplay.innerText = "לא זוהו פריטים בנפרד.";
+                itemsDisplay.innerText = "לא זוהו פרטים בשרת.";
             }
 
             confirmForm.classList.remove('hidden');
@@ -685,7 +782,7 @@
             const supplierSel = document.getElementById('invoiceSupplierSelect');
             let supplier = supplierSel.value;
             if (supplier === '__other__') {
-                const custom = prompt("הכנס את שם הספק:");
+                const custom = prompt("הקלד את שם הספק:");
                 if (!custom || !custom.trim()) { alert("אנא הכנס שם ספק."); return; }
                 supplier = custom.trim();
                 if (!suppliersList.includes(supplier)) {
@@ -699,7 +796,7 @@
             if (isNaN(amount) || amount === 0) { alert("אנא הכנס סכום תקין (אפשר סכום שלילי לזיכוי, אך לא 0)."); return; }
             const paymentMethod = document.getElementById('invoicePaymentMethodInput').value.trim();
             let notes = document.getElementById('invoiceNotesInput').value.trim();
-            if (notes === 'חשבונית זיכוי') notes = ''; // מניעה מוחלטת
+            if (notes === 'חשבונית זיכוי') notes = ''; 
             const monthKey = getSelectedInvoiceMonth();
 
             try {
@@ -744,7 +841,7 @@
                 monthlyInvoices = [];
                 snap.forEach(d => {
                     let data = d.data();
-                    if (data.notes === 'חשבונית זיכוי') data.notes = ''; // ניקוי אוטומטי מהשרת
+                    if (data.notes === 'חשבונית זיכוי') data.notes = ''; 
                     monthlyInvoices.push(data);
                 });
                 monthlyInvoices.sort((a, b) => (a.supplier || '').localeCompare(b.supplier || '', 'he'));
@@ -896,7 +993,7 @@
                 return;
             }
 
-            selectEl.innerHTML = '<option value="">-- בחר ספק לצפייה בפירוט --</option>' +
+            selectEl.innerHTML = '<option value="">-- בחר ספק להצגה בפירוט --</option>' +
                 uniqueSuppliers.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('');
             
             document.getElementById('supplierSummaryDisplay').classList.add('hidden');
@@ -945,18 +1042,18 @@
             let itemsHtml = '';
 
             if (itemsList.length === 0) {
-                itemsHtml = '<p style="color:#666; font-size:0.85em; margin:4px 0;">לא זוהו פריטים בנפרד עבור ספק זה בחודש הנבחר.</p>';
+                itemsHtml = '<p style="color:#666; font-size:0.85em; margin:4px 0;">לא זוהו פריטים בטקסט תחת ספק זה בחודש הנוכחי.</p>';
             } else {
                 itemsHtml = itemsList.map(name => {
                     const data = itemMap[name];
                     return `<div style="padding:4px 0; border-bottom:1px dashed #e0e0e0; font-size:0.85em;">
-                        • <b>${esc(name)}</b> - כמות מצטברת: <b>${data.quantity}</b> ${data.totalPrice !== 0 ? '| עלות: <b>' + data.totalPrice.toFixed(2) + ' ₪</b>' : ''}
+                        • <b>${esc(name)}</b> - כמות מצטברת: <b>${data.quantity}</b> ${data.totalPrice !== 0 ? '| סכום: <b>' + data.totalPrice.toFixed(2) + ' ₪</b>' : ''}
                     </div>`;
                 }).join('');
             }
 
             displayEl.innerHTML = `
-                <h4 style="margin:0 0 6px 0; color:#1877f2;">סיכום עבור: ${esc(selectedSupplier)}</h4>
+                <h4 style="margin:0 0 6px 0; color:#1877f2;">סיכום ספציפי: ${esc(selectedSupplier)}</h4>
                 <div style="font-size:0.9em; font-weight:bold; margin-bottom:8px;">
                     מספר חשבוניות: ${supplierInvoices.length} | סה"כ לתשלום נטו: <span style="color:${totalAmount < 0 ? '#d9534f' : '#27ae60'};">${totalAmount.toFixed(2)} ₪</span>
                 </div>
@@ -973,7 +1070,7 @@
             const resultsBox = document.getElementById('itemSearchResults');
 
             if (!queryText) {
-                alert("אנא הקלד שם פריט לחיפוש.");
+                alert("אנא הכנס שם פריט לחיפוש.");
                 return;
             }
 
@@ -998,7 +1095,7 @@
 
                             totalQuantity += qty;
                             totalCost += price;
-                            matchDetails.push(`• ספק: <b>${esc(inv.supplier)}</b> | כמות: ${qty} | מחיר: ${price !== 0 ? price.toFixed(2) + ' ₪' : 'לא מצוין'}${isCreditInvoice ? ' (זיכוי)' : ''}`);
+                            matchDetails.push(`• ספק: <b>${esc(inv.supplier)}</b> | כמות: ${qty} | מחיר: ${price !== 0 ? price.toFixed(2) + ' ₪' : 'לא מפורט'}${isCreditInvoice ? ' (זיכוי)' : ''}`);
                         }
                     });
                 }
@@ -1006,12 +1103,12 @@
 
             resultsBox.classList.remove('hidden');
             if (matchDetails.length === 0) {
-                resultsBox.innerHTML = `לא נמצאו פריטים תואמים ל-"<b>${esc(queryText)}</b>" בחודש הנבחר.`;
+                resultsBox.innerHTML = `לא נמצאו פריטים תואמים ל-"<b>${esc(queryText)}</b>" בחודש הנוכחי.`;
             } else {
                 resultsBox.innerHTML = `
-                    <b>תוצאות עבור "${esc(queryText)}":</b><br>
+                    <b>תוצאות חיפוש "${esc(queryText)}":</b><br>
                     • סה"כ יחידות/כמות שנרכשה נטו: <b>${totalQuantity}</b><br>
-                    ${totalCost !== 0 ? '• סה"כ עלות פריטים אלו נטו: <b>' + totalCost.toFixed(2) + ' ₪</b><br>' : ''}
+                    ${totalCost !== 0 ? '• סה"כ סכום פריטים אלו נטו: <b>' + totalCost.toFixed(2) + ' ₪</b><br>' : ''}
                     <hr style="border:0; border-top:1px solid #ccc; margin:6px 0;">
                     <b>פירוט הרכישות והזיכויים:</b><br>
                     ${matchDetails.join('<br>')}
@@ -1021,7 +1118,7 @@
 
         window.exportInvoicesToPDF = async function() {
             const { rows, total } = getFinalReportData();
-            if (rows.length === 0) { alert("אין נתונים לדוח לחודש הנבחר."); return; }
+            if (rows.length === 0) { alert("אין נתונים לדוח לחודש זה."); return; }
 
             const monthKey = getSelectedInvoiceMonth();
             const [y, m] = monthKey.split('-');
@@ -1085,7 +1182,7 @@
         window.exportInvoicesToExcel = function() {
             const { rows, total } = getFinalReportData();
             if (rows.length === 0) {
-                alert("אין נתונים לדוח לחודש הנבחר לייצוא.");
+                alert("אין נתונים לדוח לחודש זה לייצוא.");
                 return;
             }
 
