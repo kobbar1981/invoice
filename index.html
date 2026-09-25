@@ -131,7 +131,7 @@
             </div>
         </div>
 
-        <!-- אזור חדש: סיכום רכישות לפי ספק -->
+        <!-- אזור סיכום רכישות לפי ספק -->
         <div class="card">
             <h3 style="margin-top:0;">📦 סיכום רכישות ופריטים לפי ספק</h3>
             <div class="form-group">
@@ -432,10 +432,12 @@
             return canvas.toDataURL('image/jpeg', 0.92).split(',')[1];
         }
 
-        // זיהוי אוטומטי של החשבוניות + זיהוי זיכוי וסכום מינוס
+        // זיהוי אוטומטי באמצעות Gemini API
         window.handleInvoicePhoto = async function(event) {
             const file = event.target.files && event.target.files[0];
             if (!file) return;
+
+            const GEMINI_API_KEY = "AQ.Ab8RN6JxmCWG1fqWsi8X5PMfa0BFyjVlJHIWhHd9jkz_rkNWTA";
 
             const recognizingEl = document.getElementById('invoiceRecognizing');
             const confirmForm = document.getElementById('invoiceConfirmForm');
@@ -459,8 +461,7 @@
                     `החזר אך ורק אובייקט JSON תקין במבנה הבא: ` +
                     `{"supplier": "...", "amount": 0, "isCredit": false, "paymentMethod": "...", "items": [{"name": "שם המוצר", "quantity": 1, "price": 0}]}`;
 
-                const GEMINI_API_KEY = "AQ.Ab8RN6LAzYP3yROfgxQkSWaA-y8GOwnvyl_jeSv2rPTCG8R4fA";
-                const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${GEMINI_API_KEY}`;
+                const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
 
                 const response = await fetch(url, {
                     method: "POST",
@@ -678,7 +679,6 @@
             }
         };
 
-        // פונקציה לטעינת רשימת הספקים שקיימים בחודש הנוכחי לתפריט הנגלל
         function populateSupplierSummaryOptions() {
             const selectEl = document.getElementById('supplierSummarySelect');
             if (!selectEl) return;
@@ -697,7 +697,6 @@
             document.getElementById('supplierSummaryDisplay').classList.add('hidden');
         }
 
-        // פונקציה להצגת סיכום הפריטים והרכישות של ספק מסוים
         window.renderSupplierSummary = function() {
             const selectEl = document.getElementById('supplierSummarySelect');
             const displayEl = document.getElementById('supplierSummaryDisplay');
@@ -764,7 +763,6 @@
             displayEl.classList.remove('hidden');
         };
 
-        // חיפוש וסיכום פריטים תוך התחשבות בזיכויים
         window.searchAndSummarizeItems = function() {
             const queryText = (document.getElementById('itemSearchQuery').value || '').trim().toLowerCase();
             const resultsBox = document.getElementById('itemSearchResults');
@@ -816,7 +814,6 @@
             }
         };
 
-        // הפקת דוח PDF מותאמת לדפדפנים בנייד
         window.exportInvoicesToPDF = async function() {
             if (monthlyInvoices.length === 0) { alert("אין חשבוניות לחודש הנבחר כדי להפיק דוח."); return; }
 
@@ -859,7 +856,6 @@
             exportContainer.style.top = '0';
             exportContainer.style.zIndex = '-9999';
 
-            // השהייה המאפשרת לדפדפן הנייד לרנדר את ה-DOM לפני הפיכה לתמונה
             await new Promise(resolve => setTimeout(resolve, 300));
 
             try {
@@ -883,7 +879,6 @@
 
                 pdf.addImage(imgData, 'JPEG', x, y, imgWidth, imgHeight);
 
-                // הורדה בטוחה של קובץ ה-PDF למכשירים ניידים
                 const blob = pdf.output('blob');
                 const blobUrl = URL.createObjectURL(blob);
                 const a = document.createElement('a');
