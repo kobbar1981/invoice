@@ -1,24 +1,16 @@
 {
-  "name": "ניהול חשבוניות",
+  "name": "ניהול חשבוניות חודשי",
   "short_name": "חשבוניות",
-  "start_url": "./",
+  "lang": "he",
+  "dir": "rtl",
+  "start_url": "./index.html",
+  "scope": "./",
   "display": "standalone",
   "background_color": "#f0f2f5",
   "theme_color": "#1877f2",
-  "share_target": {
-    "action": "./",
-    "method": "GET",
-    "params": {
-      "title": "title",
-      "text": "text",
-      "url": "url"
-    },
-    "enctype": "multipart/form-data",
-    "files": [
-      {
-        "name": "invoice_file",
-        "accept": ["image/*", "application/pdf"]
-      }
-    ]
-  }
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
 }
