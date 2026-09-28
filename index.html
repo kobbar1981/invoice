@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="he" dir="rtl">
 <head>
     <meta charset="UTF-8">
@@ -12,7 +12,7 @@
     <meta name="apple-mobile-web-app-title" content="חשבוניות">
     <meta name="theme-color" content="#1877f2">
 
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -86,9 +86,30 @@
         .upload-tile:active { transform: scale(0.98); box-shadow: 0 1px 3px rgba(0,0,0,0.12); }
         .upload-tile svg { width: 26px; height: 26px; flex-shrink: 0; }
 
+
+        /* מודאל מצלמה חיה */
+        #cameraModalOverlay {
+            position: fixed; inset: 0; background: #000; z-index: 9999;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+        }
+        #cameraModalOverlay video { width: 100%; height: auto; max-height: 75vh; background: #000; }
+        #cameraModalControls { display: flex; gap: 10px; width: 100%; max-width: 480px; padding: 12px; box-sizing: border-box; }
+        #cameraModalControls button { margin-top: 0; }
+        #cameraModalError { color: #fff; background: #c0392b; padding: 10px; border-radius: 8px; margin: 12px; text-align: center; font-size: 0.9em; }
     </style>
 </head>
 <body>
+<!-- מודאל מצלמה חיה לצילום תמונה בודדת -->
+    <div id="cameraModalOverlay" class="hidden">
+        <video id="cameraModalVideo" autoplay playsinline muted poster="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" style="opacity:0; transition:opacity 0.2s;"></video>
+        <div id="cameraModalError" class="hidden"></div>
+        <div id="cameraModalControls">
+            <button onclick="capturePhotoFromCamera()" style="background-color:#27ae60;">📸 צלם</button>
+            <button onclick="closeCameraModal()" style="background-color:#7f8c8d;">ביטול</button>
+        </div>
+    </div>
+    <canvas id="cameraModalCanvas" class="hidden"></canvas>
+
 
     <div class="restaurant-tag" id="restaurantTag"></div>
     <h1>מערכת ניהול חשבוניות חודשי</h1>
@@ -111,10 +132,16 @@
 
             <div class="form-group">
                 <label>צילום או העלאת חשבונית:</label>
-                <button type="button" class="upload-tile" data-recognition-trigger onclick="document.getElementById('fileUploadInput').click()">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
-                    <span>צלם עם מצלמה / העלה קובץ</span>
-                </button>
+                <div style="display:flex; gap:8px;">
+                    <button type="button" class="upload-tile" data-recognition-trigger onclick="openCameraModal()">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+                        <span>צלם</span>
+                    </button>
+                    <button type="button" class="upload-tile" data-recognition-trigger onclick="document.getElementById('fileUploadInput').click()">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                        <span>העלה קובץ</span>
+                    </button>
+                </div>
                 <input type="file" accept="image/jpeg,image/jpg,image/png,image/webp,image/heic,image/heif,.pdf,application/pdf" id="fileUploadInput" class="hidden">
             </div>
 
@@ -133,6 +160,10 @@
                 <div class="form-group">
                     <label>מספר חשבונית / אסמכתא:</label>
                     <input type="text" id="invoiceNumberInput" placeholder="מספר חשבונית (אם קיים)">
+                </div>
+                <div class="form-group">
+                    <label>תאריך החשבונית:</label>
+                    <input type="date" id="invoiceDateInput">
                 </div>
                 <div class="form-group">
                     <label>סכום לתשלום (₪):</label>
@@ -426,6 +457,64 @@
             return (el && el.value) ? el.value : getCurrentMonthKey();
         }
 
+        // ---- מודאל מצלמה חיה (getUserMedia) ----
+        let cameraStream = null;
+
+        window.openCameraModal = async function() {
+            const overlay = document.getElementById('cameraModalOverlay');
+            const video = document.getElementById('cameraModalVideo');
+            const errorBox = document.getElementById('cameraModalError');
+            errorBox.classList.add('hidden');
+            errorBox.innerText = '';
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                alert("הדפדפן/האפליקציה לא תומכים בגישה למצלמה. נסה להעלות תמונה במקום זאת.");
+                return;
+            }
+            video.style.opacity = '0';
+            overlay.classList.remove('hidden');
+            try {
+                cameraStream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1920 } },
+                    audio: false
+                });
+                video.onplaying = () => { video.style.opacity = '1'; };
+                video.srcObject = cameraStream;
+                try { await video.play(); } catch (e) { /* autoplay מטפל בזה */ }
+            } catch (err) {
+                errorBox.innerText = "לא ניתן לפתוח את המצלמה: " + err.message + " (ודא שהאפליקציה קיבלה הרשאת מצלמה)";
+                errorBox.classList.remove('hidden');
+            }
+        };
+
+        window.closeCameraModal = function() {
+            const overlay = document.getElementById('cameraModalOverlay');
+            const video = document.getElementById('cameraModalVideo');
+            overlay.classList.add('hidden');
+            if (cameraStream) {
+                cameraStream.getTracks().forEach(t => t.stop());
+                cameraStream = null;
+            }
+            video.srcObject = null;
+            video.style.opacity = '0';
+        };
+
+        window.capturePhotoFromCamera = async function() {
+            const video = document.getElementById('cameraModalVideo');
+            const canvas = document.getElementById('cameraModalCanvas');
+            if (!video.videoWidth || !video.videoHeight) {
+                alert("המצלמה עדיין לא מוכנה, נסה שוב עוד רגע.");
+                return;
+            }
+            // כיווץ בזמן הצילום: מקסימום 1600 פיקסלים בצד הארוך, איכות 80%
+            const scale = Math.min(1, 1600 / Math.max(video.videoWidth, video.videoHeight));
+            canvas.width = Math.round(video.videoWidth * scale);
+            canvas.height = Math.round(video.videoHeight * scale);
+            canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+            const base64Data = canvas.toDataURL('image/jpeg', 0.8).split(',')[1];
+            closeCameraModal();
+            await processInvoiceImageData(base64Data, 'image/jpeg');
+        };
+
         function initInvoicesModule() {
             const monthInput = document.getElementById('invoiceMonthSelect');
             if (monthInput) {
@@ -717,6 +806,7 @@
             renderSupplierSelect();
             const supplierSel = document.getElementById('invoiceSupplierSelect');
             const numberInput = document.getElementById('invoiceNumberInput');
+            const dateInput = document.getElementById('invoiceDateInput');
             const amountInput = document.getElementById('invoiceAmountInput');
             const paymentInput = document.getElementById('invoicePaymentMethodInput');
             const notesInput = document.getElementById('invoiceNotesInput');
@@ -737,6 +827,7 @@
                     supplierSel.value = '__other__';
                 }
                 numberInput.value = existingInvoice.invoiceNumber || '';
+                if (dateInput) dateInput.value = existingInvoice.invoiceDate || '';
                 amountInput.value = existingInvoice.amount ?? '';
                 paymentInput.value = existingInvoice.paymentMethod ?? '';
                 notesInput.value = (existingInvoice.notes === 'חשבונית זיכוי') ? '' : (existingInvoice.notes ?? '');
@@ -760,6 +851,11 @@
                 notesInput.value = '';
 
                 numberInput.value = (recognized && recognized.invoiceNumber) ? recognized.invoiceNumber : '';
+                // תאריך שזוהה ע"י ה-AI (YYYY-MM-DD) - מקבלים רק תאריך תקין, אחרת משאירים ריק
+                if (dateInput) {
+                    const d = recognized && recognized.invoiceDate;
+                    dateInput.value = (typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d) && !isNaN(new Date(d).getTime())) ? d : '';
+                }
                 amountInput.value = (recognized && typeof recognized.amount === 'number') ? recognized.amount : '';
                 paymentInput.value = (recognized && recognized.paymentMethod) ? recognized.paymentMethod : '';
                 recognizedItemsList = (recognized && Array.isArray(recognized.items)) ? recognized.items : [];
@@ -830,12 +926,31 @@
             const paymentMethod = document.getElementById('invoicePaymentMethodInput').value.trim();
             let notes = document.getElementById('invoiceNotesInput').value.trim();
             if (notes === 'חשבונית זיכוי') notes = '';
-            const monthKey = getSelectedInvoiceMonth();
+            const invoiceDate = (document.getElementById('invoiceDateInput').value || '').trim();
+            const selectedMonth = getSelectedInvoiceMonth();
+            // אם הוזן תאריך - החשבונית משויכת לחודש של התאריך, ולא בהכרח לחודש שנבחר בתצוגה
+            const monthKey = invoiceDate ? invoiceDate.slice(0, 7) : selectedMonth;
             const isUpdate = Boolean(editingInvoiceId);
+
+            if (invoiceDate && monthKey !== selectedMonth) {
+                const [dy, dm, dd] = invoiceDate.split('-');
+                const [my, mm] = monthKey.split('-');
+                if (!confirm(`תאריך החשבונית הוא ${dd}/${dm}/${dy}, ולכן היא תישמר בחודש ${mm}/${my} (ולא בחודש שמוצג עכשיו).\nלהמשיך?`)) {
+                    return;
+                }
+            }
 
             // בדיקת כפילות אמיתית לפני שמירה בפועל - לא רק אזהרה חזותית, אלא חסימה שדורשת אישור מפורש
             if (!isUpdate) {
-                const isDuplicate = monthlyInvoices.some(inv => {
+                // בדיקת הכפילות מתבצעת מול החודש שאליו החשבונית תישמר בפועל
+                let compareList = monthlyInvoices;
+                if (monthKey !== selectedMonth) {
+                    try {
+                        const snapCmp = await getDocs(query(getInvoicesCollection(), where("monthKey", "==", monthKey)));
+                        compareList = snapCmp.docs.map(d => d.data());
+                    } catch (e) { compareList = []; }
+                }
+                const isDuplicate = compareList.some(inv => {
                     const sameSupplier = inv.supplier === supplier;
                     const sameAmount = Math.abs((Number(inv.amount) || 0) - amount) < 0.01;
                     const sameNum = invoiceNumber && inv.invoiceNumber && (String(inv.invoiceNumber).trim() === invoiceNumber);
@@ -851,7 +966,7 @@
             try {
                 const invoiceId = editingInvoiceId || makeInvoiceId();
                 const invData = {
-                    id: invoiceId, supplier, invoiceNumber, amount, paymentMethod, notes, monthKey,
+                    id: invoiceId, supplier, invoiceNumber, invoiceDate, amount, paymentMethod, notes, monthKey,
                     items: recognizedItemsList
                 };
                 if (!isUpdate) {
@@ -888,6 +1003,11 @@
                 recognizedItemsList = [];
                 editingInvoiceId = null;
                 alert(isUpdate ? "החשבונית עודכנה בהצלחה!" : "החשבונית נשמרה בהצלחה!");
+                if (monthKey !== selectedMonth) {
+                    const monthEl = document.getElementById('invoiceMonthSelect');
+                    if (monthEl) monthEl.value = monthKey;
+                    customReportEdits = {};
+                }
                 loadInvoicesForMonth();
             } catch(e) {
                 alert("שגיאה בשמירת החשבונית: " + (e && e.message ? e.message : "שגיאה לא ידועה") + "\nניתן לנסות שוב.");
@@ -955,7 +1075,7 @@
                     return `
                         <tr class="${isCredit ? 'credit-row' : ''}">
                             <td>${esc(inv.supplier)}</td>
-                            <td>${esc(inv.invoiceNumber || '-')}</td>
+                            <td>${esc(inv.invoiceNumber || '-')}${inv.invoiceDate ? `<br><span style="font-size:0.8em; color:#777;">${esc(inv.invoiceDate.split('-').reverse().join('/'))}</span>` : ''}</td>
                             <td class="${isCredit ? 'credit-badge' : ''}">${amt.toFixed(2)} ₪ ${isCredit ? '(זיכוי)' : ''}</td>
                             <td>${esc(inv.paymentMethod || '-')}</td>
                             <td>${esc(itemsTooltip)}</td>
