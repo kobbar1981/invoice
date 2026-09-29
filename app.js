@@ -124,12 +124,98 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
                 }
                 if (!ok) { alert("סיסמה שגויה!"); return; }
 
-                document.getElementById('lockedView').classList.add('hidden');
-                document.getElementById('mainView').classList.remove('hidden');
-
-                initInvoicesModule();
+                enterApp();
+                offerBiometricEnroll();
             } catch(e) { alert("שגיאה באימות הסיסמה."); }
         };
+
+        // ================= כניסה בטביעת אצבע (WebAuthn) =================
+        // האימות נעשה במכשיר עצמו; הסיסמה נשארת תמיד כגיבוי. נשמר רק מזהה האישור (לא טביעת האצבע).
+        const bioKey = () => 'invoices_bio_cred_' + RESTAURANT_ID;
+        const bioAskedKey = () => 'invoices_bio_asked_' + RESTAURANT_ID;
+        const b64uEnc = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+        const b64uDec = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
+        async function bioSupported() {
+            try {
+                return !!(window.PublicKeyCredential && navigator.credentials &&
+                    await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable());
+            } catch (e) { return false; }
+        }
+        function bioEnrolled() { try { return !!localStorage.getItem(bioKey()); } catch (e) { return false; } }
+
+        function enterApp() {
+            document.getElementById('lockedView').classList.add('hidden');
+            document.getElementById('mainView').classList.remove('hidden');
+            initInvoicesModule();
+        }
+
+        async function refreshBiometricUI() {
+            const supported = await bioSupported();
+            const enrolled = supported && bioEnrolled();
+            const loginBtn = document.getElementById('bioLoginBtn');
+            if (loginBtn) loginBtn.classList.toggle('hidden', !enrolled);
+            const box = document.getElementById('bioSettings');
+            const tgl = document.getElementById('bioToggleBtn');
+            if (box && tgl) {
+                box.classList.toggle('hidden', !supported);
+                tgl.textContent = enrolled ? '🔐 כבה כניסה בטביעת אצבע' : '🔐 הפעל כניסה בטביעת אצבע';
+            }
+        }
+
+        async function enrollBiometric() {
+            try {
+                const rnd = n => crypto.getRandomValues(new Uint8Array(n));
+                const cred = await navigator.credentials.create({ publicKey: {
+                    challenge: rnd(32),
+                    rp: { name: 'ניהול חשבוניות', id: location.hostname },
+                    user: { id: rnd(16), name: 'manager', displayName: 'מנהל' },
+                    pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
+                    authenticatorSelection: { authenticatorAttachment: 'platform', userVerification: 'required', residentKey: 'discouraged' },
+                    timeout: 60000
+                } });
+                localStorage.setItem(bioKey(), b64uEnc(cred.rawId));
+                showToast('✅ כניסה בטביעת אצבע הופעלה', 'ok');
+                return true;
+            } catch (e) {
+                if (!(e && e.name === 'NotAllowedError')) alert('לא ניתן להפעיל טביעת אצבע בסביבה הזו (ייתכן שהאפליקציה לא תומכת). הכניסה בסיסמה ממשיכה לעבוד.');
+                return false;
+            } finally { refreshBiometricUI(); }
+        }
+
+        window.unlockWithBiometric = async function() {
+            if (!RESTAURANT_ID) return;
+            try {
+                await navigator.credentials.get({ publicKey: {
+                    challenge: crypto.getRandomValues(new Uint8Array(32)),
+                    rpId: location.hostname,
+                    allowCredentials: [{ type: 'public-key', id: b64uDec(localStorage.getItem(bioKey())), transports: ['internal'] }],
+                    userVerification: 'required',
+                    timeout: 60000
+                } });
+                enterApp();
+            } catch (e) {
+                if (e && e.name !== 'NotAllowedError') alert('הזיהוי בטביעת אצבע נכשל. היכנס עם סיסמה.');
+            }
+        };
+
+        window.toggleBiometric = async function() {
+            if (bioEnrolled()) {
+                if (!await appConfirm('לכבות כניסה בטביעת אצבע במכשיר הזה?')) return;
+                try { localStorage.removeItem(bioKey()); } catch (e) {}
+                showToast('כניסה בטביעת אצבע כובתה');
+                refreshBiometricUI();
+            } else { await enrollBiometric(); }
+        };
+
+        // אחרי כניסה מוצלחת בסיסמה - מציעים להפעיל (פעם אחת בלבד לכל מכשיר)
+        async function offerBiometricEnroll() {
+            try {
+                if (bioEnrolled() || localStorage.getItem(bioAskedKey()) || !(await bioSupported())) return;
+                localStorage.setItem(bioAskedKey(), '1');
+                if (await appConfirm('להפעיל כניסה בטביעת אצבע במכשיר הזה?\nהסיסמה תמשיך לעבוד כגיבוי.', { ok: 'הפעל', cancel: 'לא עכשיו' })) await enrollBiometric();
+            } catch (e) {}
+        }
+        window.addEventListener('load', refreshBiometricUI);
 
         const DEFAULT_SUPPLIERS = [
             "אמיגה", "אבי-קדו", "בכור שיווק דגים", "קוקורייצ'ו", "מנצח ומספר", "שטראוס גן",

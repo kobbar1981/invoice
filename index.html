@@ -42,6 +42,7 @@
     <!-- מסך נעילה -->
     <div class="card" id="lockedView">
         <h2>הגנת סיסמה למנהל</h2>
+        <button id="bioLoginBtn" class="hidden" onclick="unlockWithBiometric()" style="background-color:#8e44ad; max-width:260px; margin:0 auto 8px;">🔐 כניסה בטביעת אצבע</button>
         <button onclick="unlockApp()" style="background-color:#27ae60; max-width:260px; margin:0 auto;">כניסה</button>
     </div>
 
@@ -300,6 +301,10 @@
             </div>
             <input type="text" id="supplierFilterInput" placeholder="🔍 חפש ספק..." oninput="renderSupplierManageList()" style="margin-top:8px;">
             <div id="supplierListManage" style="margin-top:6px;"></div>
+        </div>
+
+        <div id="bioSettings" class="hidden" style="text-align:center; margin:8px 0;">
+            <button id="bioToggleBtn" onclick="toggleBiometric()" style="width:auto; background-color:#7f8c8d; margin-top:0;">🔐 הפעל כניסה בטביעת אצבע</button>
         </div>
     </div>
 
