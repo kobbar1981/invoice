@@ -1,0 +1,2392 @@
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+        import { getFirestore, initializeFirestore, persistentLocalCache, persistentMultipleTabManager, collection, doc, setDoc, getDoc, getDocs, deleteDoc, onSnapshot, query, where, writeBatch } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+        import { getStorage, ref as storageRef, uploadString, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-storage.js";
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyASfsSMXS62ehM1kVSjOpudOEUGUh37BYI",
+            authDomain: "work-schedule-17c39.firebaseapp.com",
+            projectId: "work-schedule-17c39",
+            storageBucket: "work-schedule-17c39.firebasestorage.app",
+            messagingSenderId: "708640197618",
+            appId: "1:708640197618:web:c3731ecf7c7ef80fd3396b"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        let db;
+        try {
+            // מטמון מקומי: אפשר להוסיף מסמכים גם בלי אינטרנט, והם יסונכרנו כשהחיבור חוזר
+            db = initializeFirestore(app, { localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }) });
+        } catch (e) { db = getFirestore(app); }
+        const storage = getStorage(app);
+
+        if (window.pdfjsLib) {
+            window.pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+        }
+
+        function sanitizeRestaurantId(raw) {
+            const cleaned = String(raw || '').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
+            return cleaned || '';
+        }
+
+        let RESTAURANT_ID = '';
+
+        function getSettingsDoc(docName) { return doc(db, `${RESTAURANT_ID}_settings`, docName); }
+        function getInvoicesCollection() { return collection(db, `${RESTAURANT_ID}_invoices`); }
+
+        function esc(value) {
+            return String(value ?? '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        // עוטף Promise בהגבלת זמן - אם הפעולה לא מסתיימת תוך ms מילישניות, נכשלת עם שגיאה
+        // במקום להישאר תקועה לנצח (למשל אפלוד תמונה על רשת חלשה/לא יציבה).
+        function withTimeout(promise, ms, label) {
+            return Promise.race([
+                promise,
+                new Promise((_, reject) => setTimeout(() => reject(new Error(`חריגת זמן (${label || 'פעולה'}) - הרשת איטית מדי או לא מגיבה.`)), ms))
+            ]);
+        }
+
+        // כשאין אינטרנט הכתיבה נשמרת בתור המקומי ולא מחכים לאישור השרת (אחרת השמירה הייתה "נתקעת")
+        function ackOrQueue(promise, ms, label) {
+            if (navigator.onLine === false) { promise.catch(() => {}); return Promise.resolve(); }
+            return withTimeout(promise, ms, label);
+        }
+
+        function bytesToHex(buf) {
+            return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+        }
+        function hexToBytes(hex) {
+            const out = new Uint8Array(hex.length / 2);
+            for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.substr(i * 2, 2), 16);
+            return out;
+        }
+        async function hashPassword(pass, saltHex) {
+            const enc = new TextEncoder();
+            const keyMaterial = await crypto.subtle.importKey("raw", enc.encode(pass), "PBKDF2", false, ["deriveBits"]);
+            const bits = await crypto.subtle.deriveBits(
+                { name: "PBKDF2", salt: hexToBytes(saltHex), iterations: 150000, hash: "SHA-256" },
+                keyMaterial, 256
+            );
+            return bytesToHex(bits);
+        }
+        const LEGACY_DEFAULT_PASSWORD = "1212";
+
+        function updateRestaurantTag() {
+            const tagEl = document.getElementById('restaurantTag');
+            if (tagEl) tagEl.textContent = RESTAURANT_ID ? `עסק: ${RESTAURANT_ID}` : '';
+        }
+
+        const DEFAULT_RESTAURANT_ID = 'yoko';
+
+        function initRestaurantId() {
+            const fromUrl = sanitizeRestaurantId(new URLSearchParams(window.location.search).get('r'));
+            let fromStorage = '';
+            try { fromStorage = sanitizeRestaurantId(localStorage.getItem('work_schedule_restaurant_id')); } catch(e){}
+            RESTAURANT_ID = fromUrl || fromStorage || DEFAULT_RESTAURANT_ID;
+            updateRestaurantTag();
+
+            if (!RESTAURANT_ID) {
+                document.getElementById('lockedView').innerHTML =
+                    `<h2>שגיאה בזיהוי עסק</h2><p style="font-size:0.9em; color:#555;">אנא בדוק את הכתובת בשורת הכתובות בדפדפן, או הוסף מזהה עסק תקין בפרמטר.</p>`;
+                return false;
+            }
+            return true;
+        }
+
+        window.unlockApp = async function() {
+            if (!RESTAURANT_ID) return;
+            let cfg = null;
+            try {
+                const docSnap = await getDoc(getSettingsDoc("manager_config"));
+                if (docSnap.exists()) cfg = docSnap.data();
+            } catch(e) {
+                alert("שגיאה בחיבור לרשת.");
+                return;
+            }
+
+            const rawPass = await appPrompt("הקלד סיסמת מנהל:", "", { password: true });
+            if (rawPass === null) return;
+            const pass = rawPass.trim();
+
+            try {
+                let ok = false;
+                if (cfg && cfg.passwordHash && cfg.salt) {
+                    ok = (await hashPassword(pass, cfg.salt)) === cfg.passwordHash;
+                } else if (cfg && cfg.password) {
+                    ok = (pass === String(cfg.password));
+                } else {
+                    ok = (pass === LEGACY_DEFAULT_PASSWORD);
+                }
+                if (!ok) { alert("סיסמה שגויה!"); return; }
+
+                document.getElementById('lockedView').classList.add('hidden');
+                document.getElementById('mainView').classList.remove('hidden');
+
+                initInvoicesModule();
+            } catch(e) { alert("שגיאה באימות הסיסמה."); }
+        };
+
+        const DEFAULT_SUPPLIERS = [
+            "אמיגה", "אבי-קדו", "בכור שיווק דגים", "קוקורייצ'ו", "מנצח ומספר", "שטראוס גן",
+            "סגלולייב", "דים סאם", "ג'ומונים", "וולט קור", "מ.ר כליות", "שוריורות", "א.ב שיווק בשר",
+            "יצחקאוטופרסט", "הוד", "שורטסטול", "איטון תעשיות", "נסט לפאש'", "אמוס הרחיצה", "סוופור דגן",
+            "בדיק", "חזמוש", "מים ואנרגיה", "מחזגים", "טין בית", "סיביטוב", "וולטס", "מחזוריות",
+            "גודיי", "sfd", "יוחאי קייצון", "בלקו", "פירי יגן", "אייסווסיו 4 מיי"
+        ];
+
+        let suppliersList = DEFAULT_SUPPLIERS.slice();
+        let monthlyInvoices = [];
+        let recognizedImageBase64 = null;
+        let recognizedItemsList = [];
+        let editingInvoiceId = null;
+        let customReportEdits = {};
+
+        // ---- מצב סריקה (חשבונית / תעודת משלוח), ריבוי עמודים ומחירון ----
+        let scanMode = 'invoice';            // 'invoice' | 'delivery'
+        let monthlyNotes = [];               // תעודות משלוח של החודש הנבחר
+        let supplierAliases = { names: {}, taxIds: {} };   // כינויי ספקים שנלמדו (שם מנורמל / ח.פ. -> שם ספק ברשימה)
+        let lastRecognizedSupplierRaw = '';  // השם/ח.פ. שה-AI זיהה בסריקה האחרונה (ללמידת כינוי)
+        let lastRecognizedTaxId = '';
+        let autoDetectedDocType = null;
+        let handwrittenNotesList = [];       // [{text, type, item, printedQty, handwrittenQty, keep}]
+        let cameraPages = [];                // עמודים שצולמו במצלמה עד לעיבוד
+        let cameraMode = 'invoice';
+        let recognizedPageCount = 1;
+        let editingOriginalKind = null;      // 'invoice' | 'delivery' - הסוג של המסמך הקיים בזמן עריכה (לזיהוי המרה)
+        let currentScanPages = [];           // עמודי הסריקה הנוכחית (base64) - לצורך הוספת עמודים
+        let currentScanResults = [];         // תוצאות זיהוי לכל עמוד
+        let appendingToScan = false;         // המצלמה פתוחה להוספת עמוד למסמך הקיים
+        let lastAutoAmount = null;           // הסכום שהמערכת מילאה אוטומטית (כדי לא לדרוס עריכה ידנית)
+        let currentPriceChanges = { ups: [], downs: [] };
+        const priceBookCache = {};           // ספק -> { מפתח פריט -> רשומת מחיר אחרון }
+        const MAX_SCAN_PAGES = 8;
+        const PRICE_ALERT_MIN_PERCENT = 1;   // עלייה/ירידה קטנה מזה (באחוזים) לא תסומן
+
+        function getCurrentMonthKey() {
+            const d = new Date();
+            return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+        }
+        function getSelectedInvoiceMonth() {
+            const el = document.getElementById('invoiceMonthSelect');
+            return (el && el.value) ? el.value : getCurrentMonthKey();
+        }
+
+        // ---- מודאל מצלמה חיה (getUserMedia) ----
+        let cameraStream = null;
+
+        window.openCameraModal = async function(mode, keepPages, append) {
+            cameraMode = (mode === 'delivery') ? 'delivery' : 'invoice';
+            scanMode = cameraMode;
+            if (!keepPages) { cameraPages = []; appendingToScan = Boolean(append); }
+            const overlay = document.getElementById('cameraModalOverlay');
+            const video = document.getElementById('cameraModalVideo');
+            const errorBox = document.getElementById('cameraModalError');
+            errorBox.classList.add('hidden');
+            errorBox.innerText = '';
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                alert("הדפדפן/האפליקציה לא תומכים בגישה למצלמה. נסה להעלות תמונה במקום זאת.");
+                return;
+            }
+            video.style.opacity = '0';
+            overlay.classList.remove('hidden');
+            try {
+                cameraStream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1920 } },
+                    audio: false
+                });
+                video.onplaying = () => { video.style.opacity = '1'; };
+                video.srcObject = cameraStream;
+                try { await video.play(); } catch (e) { /* autoplay מטפל בזה */ }
+            } catch (err) {
+                errorBox.innerText = "לא ניתן לפתוח את המצלמה: " + err.message + " (ודא שהאפליקציה קיבלה הרשאת מצלמה)";
+                errorBox.classList.remove('hidden');
+            }
+        };
+
+        window.closeCameraModal = function() {
+            const overlay = document.getElementById('cameraModalOverlay');
+            const video = document.getElementById('cameraModalVideo');
+            overlay.classList.add('hidden');
+            if (cameraStream) {
+                cameraStream.getTracks().forEach(t => t.stop());
+                cameraStream = null;
+            }
+            video.srcObject = null;
+            video.style.opacity = '0';
+        };
+
+        window.capturePhotoFromCamera = async function() {
+            const video = document.getElementById('cameraModalVideo');
+            const canvas = document.getElementById('cameraModalCanvas');
+            if (!video.videoWidth || !video.videoHeight) {
+                alert("המצלמה עדיין לא מוכנה, נסה שוב עוד רגע.");
+                return;
+            }
+            // כיווץ בזמן הצילום: מקסימום 2000 פיקסלים בצד הארוך, איכות 90%
+            const scale = Math.min(1, 2000 / Math.max(video.videoWidth, video.videoHeight));
+            canvas.width = Math.round(video.videoWidth * scale);
+            canvas.height = Math.round(video.videoHeight * scale);
+            canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+            const base64Data = canvas.toDataURL('image/jpeg', 0.9).split(',')[1];
+            closeCameraModal();
+            cameraPages.push(base64Data);
+            if (cameraPages.length < MAX_SCAN_PAGES - (appendingToScan ? currentScanPages.length : 0) &&
+                await appConfirm(`צולם עמוד ${cameraPages.length}.\nלצלם עמוד נוסף באותו מסמך?\n(אישור = עוד עמוד, ביטול = סיום ועיבוד)`)) {
+                await openCameraModal(cameraMode, true);
+                return;
+            }
+            const pagesToProcess = cameraPages;
+            cameraPages = [];
+            if (appendingToScan) { appendingToScan = false; await addPagesToCurrentScan(pagesToProcess); }
+            else await processScanPages(pagesToProcess);
+        };
+
+        function initInvoicesModule() {
+            const monthInput = document.getElementById('invoiceMonthSelect');
+            if (monthInput) {
+                monthInput.value = getCurrentMonthKey();
+                monthInput.addEventListener('change', () => {
+                    customReportEdits = {};
+                    loadInvoicesForMonth();
+                });
+            }
+
+            const fileInput = document.getElementById('fileUploadInput');
+            if (fileInput) fileInput.addEventListener('change', (e) => handleScanFiles(e, 'invoice'));
+            const deliveryInput = document.getElementById('deliveryFileInput');
+            if (deliveryInput) deliveryInput.addEventListener('change', (e) => handleScanFiles(e, 'delivery'));
+            const addPageInput = document.getElementById('addPageFileInput');
+            if (addPageInput) addPageInput.addEventListener('change', handleAddPageFiles);
+            const supplierSelectEl = document.getElementById('invoiceSupplierSelect');
+            if (supplierSelectEl) supplierSelectEl.addEventListener('change', () => refreshPriceAlerts(false));
+
+            onSnapshot(getSettingsDoc("suppliers_list"), (snap) => {
+                if (snap.exists() && Array.isArray(snap.data().suppliers)) {
+                    suppliersList = snap.data().suppliers;
+                } else {
+                    suppliersList = DEFAULT_SUPPLIERS.slice();
+                    setDoc(getSettingsDoc("suppliers_list"), { suppliers: suppliersList }).catch(()=>{});
+                }
+                renderSupplierSelect();
+                renderSupplierManageList();
+            });
+
+            onSnapshot(getSettingsDoc("supplier_aliases"), (snap) => {
+                const d = snap.exists() ? snap.data() : {};
+                supplierAliases = { names: d.names || {}, taxIds: d.taxIds || {} };
+            }, () => {});
+
+            loadInvoicesForMonth();
+        }
+
+        // ---------------------------------------------------------------------
+        // זיהוי ספק חכם: כינויים שנלמדו + ח.פ. + התאמה מקורבת של שמות
+        // ---------------------------------------------------------------------
+        const SUPPLIER_STOPWORDS = new Set(['בעמ','בע','מ','ltd','inc','co','חברת','חב','שיווק','סחר','הפצה','והפצה','ייצור','יבוא','ויבוא','ישראל','תעשיות','תעשייה','מסחר','בית']);
+
+        function normSupplierName(str) {
+            const base = String(str || '').toLowerCase()
+                .replace(/[\u0591-\u05C7]/g, '')          // ניקוד
+                .replace(/["'`׳״\u2019\u201C\u201D.,()\-_\/\\־:;]/g, ' ')
+                .replace(/\s+/g, ' ').trim();
+            const tokens = base.split(' ').filter(Boolean);
+            const kept = tokens.filter(t => !SUPPLIER_STOPWORDS.has(t));
+            return (kept.length ? kept : tokens).join(' ');
+        }
+
+        function levenshteinRatio(a, b) {
+            if (a === b) return 1;
+            if (!a.length || !b.length) return 0;
+            const dp = Array.from({ length: a.length + 1 }, (_, i) => [i]);
+            for (let j = 1; j <= b.length; j++) dp[0][j] = j;
+            for (let i = 1; i <= a.length; i++) {
+                for (let j = 1; j <= b.length; j++) {
+                    dp[i][j] = Math.min(dp[i-1][j] + 1, dp[i][j-1] + 1, dp[i-1][j-1] + (a[i-1] === b[j-1] ? 0 : 1));
+                }
+            }
+            return 1 - dp[a.length][b.length] / Math.max(a.length, b.length);
+        }
+
+        function supplierSimilarity(a, b) {
+            if (!a || !b) return 0;
+            if (a === b) return 1;
+            const [short, long] = a.length <= b.length ? [a, b] : [b, a];
+            if (short.length >= 3 && (' ' + long + ' ').includes(' ' + short + ' ')) return 0.92;
+            if (short.length >= 4 && long.includes(short)) return 0.85;
+            const ta = new Set(a.split(' ')), tb = new Set(b.split(' '));
+            const inter = [...ta].filter(t => tb.has(t)).length;
+            const jaccard = inter / (ta.size + tb.size - inter);
+            return Math.max(jaccard, levenshteinRatio(a, b));
+        }
+
+        // מחזיר שם ספק מהרשימה, או '' אם אין התאמה בטוחה
+        function matchSupplier(rawName, taxId) {
+            const tax = String(taxId || '').replace(/\D/g, '');
+            if (tax.length >= 8 && supplierAliases.taxIds[tax] && suppliersList.includes(supplierAliases.taxIds[tax])) {
+                return supplierAliases.taxIds[tax];
+            }
+            const raw = String(rawName || '').trim();
+            if (!raw) return '';
+            if (suppliersList.includes(raw)) return raw;
+            const n = normSupplierName(raw);
+            if (!n) return '';
+            const learned = supplierAliases.names[n];
+            if (learned && suppliersList.includes(learned)) return learned;
+
+            const scored = suppliersList
+                .map(sup => ({ sup, score: supplierSimilarity(n, normSupplierName(sup)) }))
+                .sort((x, y) => y.score - x.score);
+            if (!scored.length || scored[0].score < 0.78) return '';
+            if (scored[1] && scored[0].score - scored[1].score < 0.08 && scored[0].score < 0.99) return '';
+            return scored[0].sup;
+        }
+
+        // לומד כינוי חדש כשבחרת ספק ידנית - בפעם הבאה הזיהוי יהיה אוטומטי
+        async function learnSupplierAlias(chosenSupplier) {
+            try {
+                if (!chosenSupplier) return;
+                const n = normSupplierName(lastRecognizedSupplierRaw);
+                const tax = String(lastRecognizedTaxId || '').replace(/\D/g, '');
+                let changed = false;
+                if (n && n !== normSupplierName(chosenSupplier) && supplierAliases.names[n] !== chosenSupplier) {
+                    supplierAliases.names[n] = chosenSupplier; changed = true;
+                }
+                if (tax.length >= 8 && supplierAliases.taxIds[tax] !== chosenSupplier) {
+                    supplierAliases.taxIds[tax] = chosenSupplier; changed = true;
+                }
+                if (changed) await ackOrQueue(setDoc(getSettingsDoc("supplier_aliases"), supplierAliases), 8000, "כינוי ספק");
+            } catch (e) { console.warn("שמירת כינוי ספק נכשלה:", e); }
+            lastRecognizedSupplierRaw = '';
+            lastRecognizedTaxId = '';
+        }
+
+        // ---------------------------------------------------------------------
+        // זיהוי סוג מסמך: חשבונית / תעודת משלוח
+        // ---------------------------------------------------------------------
+        function detectDocType(parsed) {
+            if (!parsed) return { type: 'invoice', sure: false };
+            const t = String(parsed.docType || parsed.documentType || '').toLowerCase();
+            if (/deliver|תעוד|משלוח/.test(t)) return { type: 'delivery', sure: true };
+            if (/invoice|חשבונ|credit|זיכוי|tax/.test(t)) return { type: 'invoice', sure: true };
+            // גיבוי כשהשרת לא מחזיר docType: תעודות משלוח בדרך כלל בלי אמצעי תשלום ובלי מספר חשבונית מס
+            const hasItems = Array.isArray(parsed.items) && parsed.items.length > 0;
+            if (hasItems && !parsed.paymentMethod && !parsed.isCredit) return { type: 'delivery', sure: false };
+            return { type: 'invoice', sure: false };
+        }
+
+        // ---------------------------------------------------------------------
+        // כתב יד במסמך: "חסר" / "לא סופק" / תיקון כמות - מוצג להחלטה, ומה שמסומן נשמר עם המסמך
+        // ---------------------------------------------------------------------
+        function normalizeHandwrittenNotes(raw) {
+            if (!Array.isArray(raw)) return [];
+            return raw.map(n => {
+                if (typeof n === 'string') n = { text: n };
+                if (!n || typeof n !== 'object') return null;
+                const text = String(n.text || n.note || '').trim();
+                const item = String(n.item || n.name || '').trim();
+                const printedQty = (n.printedQty ?? n.printed ?? '') === '' ? '' : String(n.printedQty ?? n.printed ?? '');
+                const handwrittenQty = (n.handwrittenQty ?? n.corrected ?? '') === '' ? '' : String(n.handwrittenQty ?? n.corrected ?? '');
+                if (!text && !item && !handwrittenQty) return null;
+                let type = String(n.type || '').toLowerCase();
+                if (!/missing|qty|other/.test(type)) type = handwrittenQty ? 'qty_change' : (/חסר|לא סופק|חוסר|לא הגיע/.test(text) ? 'missing' : 'other');
+                return { text, type, item, printedQty, handwrittenQty, keep: true };
+            }).filter(Boolean);
+        }
+
+        function describeHandwrittenNote(n) {
+            const icon = n.type === 'missing' ? '❌' : (n.type === 'qty_change' ? '🔢' : '✍️');
+            let line = '';
+            if (n.item) line += `<b>${esc(n.item)}</b>: `;
+            if (n.type === 'qty_change' && (n.printedQty || n.handwrittenQty)) {
+                line += `כמות תוקנה ${esc(n.printedQty || '?')} ← ${esc(n.handwrittenQty || '?')}`;
+                if (n.text) line += ` (${esc(n.text)})`;
+            } else {
+                line += esc(n.text || (n.type === 'missing' ? 'חסר / לא סופק' : ''));
+            }
+            return `${icon} ${line}`;
+        }
+
+        function renderHandwrittenBox(existingNotes) {
+            const box = document.getElementById('handwrittenBox');
+            const list = document.getElementById('handwrittenList');
+            if (!box || !list) return;
+            if (!handwrittenNotesList.length) { box.classList.add('hidden'); list.innerHTML = ''; return; }
+            list.innerHTML = handwrittenNotesList.map((n, i) => `
+                <label style="display:flex; gap:8px; align-items:flex-start; margin:6px 0; font-weight:normal; cursor:pointer;">
+                    <input type="checkbox" style="width:auto; margin-top:4px;" ${n.keep ? 'checked' : ''} onchange="toggleHandwrittenNote(${i}, this.checked)">
+                    <span>${describeHandwrittenNote(n)}</span>
+                </label>`).join('');
+            box.classList.remove('hidden');
+        }
+
+        window.toggleHandwrittenNote = function(i, keep) {
+            if (handwrittenNotesList[i]) handwrittenNotesList[i].keep = Boolean(keep);
+        };
+
+        function keptHandwrittenNotes() {
+            return handwrittenNotesList.filter(n => n.keep).map(n => ({ text: n.text, type: n.type, item: n.item, printedQty: n.printedQty, handwrittenQty: n.handwrittenQty }));
+        }
+
+        function handwrittenBadgeHtml(doc) {
+            const arr = Array.isArray(doc.handwrittenNotes) ? doc.handwrittenNotes : [];
+            if (!arr.length) return '';
+            const tip = arr.map(n => describeHandwrittenNote(n).replace(/<[^>]+>/g, '')).join('\n');
+            return `<div style="font-size:0.75em; color:#7d6608; background:#fffbea; border:1px solid #f1c40f; border-radius:6px; padding:2px 4px; margin-top:3px; text-align:right;" title="${esc(tip)}">${arr.map(n => describeHandwrittenNote(n)).join('<br>')}</div>`;
+        }
+
+        function applyDocTypeUI() {
+            const isDelivery = (scanMode === 'delivery');
+            const typeSel = document.getElementById('docTypeSelect');
+            if (typeSel) typeSel.value = isDelivery ? 'delivery' : 'invoice';
+            const numberLabelEl = document.getElementById('numberLabel');
+            const amountLabelEl = document.getElementById('amountLabel');
+            const paymentGroupEl = document.getElementById('paymentGroup');
+            const formTitle = document.getElementById('confirmFormTitle');
+            const saveBtn = document.getElementById('saveInvoiceBtn');
+            if (numberLabelEl) numberLabelEl.innerText = isDelivery ? 'מספר תעודת משלוח:' : 'מספר חשבונית / אסמכתא:';
+            if (amountLabelEl) amountLabelEl.innerText = isDelivery ? 'סכום התעודה (₪) - אם מופיע:' : 'סכום לתשלום (₪):';
+            if (paymentGroupEl) paymentGroupEl.classList.toggle('hidden', isDelivery);
+            if (!editingInvoiceId) {
+                if (formTitle) formTitle.innerText = isDelivery ? 'אישור ואימות תעודת משלוח' : 'אישור ואימות חשבונית';
+                if (saveBtn) saveBtn.innerText = isDelivery ? 'שמור תעודה' : 'שמור חשבונית';
+            } else {
+                if (formTitle) formTitle.innerText = isDelivery ? 'עריכת תעודת משלוח קיימת' : 'עריכת חשבונית קיימת';
+                if (saveBtn) saveBtn.innerText = isDelivery ? 'עדכן תעודה' : 'עדכן חשבונית';
+            }
+        }
+
+        window.onDocTypeChange = function() {
+            const v = document.getElementById('docTypeSelect').value;
+            scanMode = (v === 'delivery') ? 'delivery' : 'invoice';
+            const hint = document.getElementById('docTypeHint');
+            if (hint) {
+                hint.innerText = '';
+                if (editingInvoiceId && editingOriginalKind && editingOriginalKind !== scanMode) {
+                    hint.style.color = '#b9770e';
+                    hint.innerText = '⚠️ בשמירה המסמך יועבר ל' + (scanMode === 'delivery' ? 'תעודות המשלוח' : 'חשבוניות') + '.';
+                }
+            }
+            applyDocTypeUI();
+        };
+
+        function renderSupplierSelect() {
+            const sel = document.getElementById('invoiceSupplierSelect');
+            if (!sel) return;
+            const prevVal = sel.value;
+            sel.innerHTML = `<option value="">-- בחר ספק --</option>`
+                + suppliersList.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('')
+                + `<option value="__other__">אחר / לא ברשימה...</option>`;
+            if (prevVal && suppliersList.includes(prevVal)) sel.value = prevVal;
+        }
+
+        function renderSupplierManageList() {
+            const container = document.getElementById('supplierListManage');
+            if (!container) return;
+            if (suppliersList.length === 0) {
+                container.innerHTML = '<p style="color:#888; font-size:0.85em;">אין ספקים ברשימה.</p>';
+                return;
+            }
+            container.innerHTML = suppliersList.map(s => `
+                <div class="supplier-manage-item">
+                    <span>${esc(s)}</span>
+                    <span>
+                        <button class="edit-btn" data-name="${esc(s)}" onclick="editSupplierName(this.dataset.name)">שנה שם</button>
+                        <button class="delete-btn" data-name="${esc(s)}" onclick="removeSupplierFromList(this.dataset.name)">הסר</button>
+                    </span>
+                </div>`).join('');
+        }
+
+        window.addSupplierToList = async function() {
+            const input = document.getElementById('newSupplierNameInput');
+            const name = (input.value || '').trim();
+            if (!name) { alert("אנא הכנס שם ספק."); return; }
+            if (suppliersList.includes(name)) { alert("הספק כבר קיים ברשימה."); return; }
+            suppliersList.push(name);
+            try {
+                await setDoc(getSettingsDoc("suppliers_list"), { suppliers: suppliersList });
+                input.value = '';
+            } catch(e) { alert("שגיאה בהוספת הספק."); }
+        };
+
+        window.removeSupplierFromList = async function(name) {
+            if (!await appConfirm(`להסיר את "${name}" מרשימת הספקים?`)) return;
+            suppliersList = suppliersList.filter(s => s !== name);
+            try {
+                await setDoc(getSettingsDoc("suppliers_list"), { suppliers: suppliersList });
+            } catch(e) { alert("שגיאה בהסרת הספק."); }
+        };
+
+        // שינוי שם ספק: מעדכן את שם הספק ברשימת הספקים, וגם בכל החשבוניות הקיימות (בכל החודשים)
+        // ששמורות תחת השם הישן - כדי שדוחות/סיכומים לא "יתפצלו" בין השם הישן לחדש.
+        window.editSupplierName = async function(oldName) {
+            const newNameRaw = await appPrompt("שם חדש לספק:", oldName);
+            if (newNameRaw === null) return; // בוטל
+            const newName = newNameRaw.trim();
+            if (!newName) { alert("שם הספק לא יכול להיות ריק."); return; }
+            if (newName === oldName) return;
+            if (suppliersList.includes(newName)) {
+                alert(`הספק "${newName}" כבר קיים ברשימה. אפשר למחוק את "${oldName}" בנפרד אם רוצים לאחד ביניהם.`);
+                return;
+            }
+
+            const idx = suppliersList.indexOf(oldName);
+            const updatedList = suppliersList.slice();
+            if (idx !== -1) updatedList[idx] = newName; else updatedList.push(newName);
+
+            try {
+                await setDoc(getSettingsDoc("suppliers_list"), { suppliers: updatedList });
+                suppliersList = updatedList;
+                renderSupplierSelect();
+                renderSupplierManageList();
+            } catch(e) {
+                alert("שגיאה בשמירת שם הספק החדש.");
+                return;
+            }
+
+            // עדכון כל החשבוניות הקיימות (בכל החודשים) שמשויכות לשם הישן
+            try {
+                const q = query(getInvoicesCollection(), where("supplier", "==", oldName));
+                const snap = await getDocs(q);
+                if (!snap.empty) {
+                    const batch = writeBatch(db);
+                    snap.forEach(d => batch.update(d.ref, { supplier: newName }));
+                    await batch.commit();
+                }
+                try { await renamePriceBookSupplier(oldName, newName); } catch (e) { console.warn("עדכון מחירון לשם הספק החדש נכשל:", e); }
+                loadInvoicesForMonth();
+            } catch(e) {
+                alert(`שם הספק עודכן ברשימה, אך עדכון החשבוניות הקיימות נכשל: ${e && e.message ? e.message : 'שגיאה לא ידועה'}\nניתן לנסות שוב מאוחר יותר.`);
+            }
+        };
+
+
+        // =====================================================================
+        // מחירון פריטים והתראות עליית מחיר
+        // לכל ספק+פריט נשמר מחיר ליחידה אחרון (ב-Firestore, באוסף ההגדרות של העסק).
+        // מחיר ליחידה = מחיר השורה / כמות (בחשבוניות it.price הוא סכום השורה).
+        // =====================================================================
+        function getSettingsCollection() { return collection(db, `${RESTAURANT_ID}_settings`); }
+        const round2 = n => Math.round((Number(n) || 0) * 100) / 100;
+
+        async function sha256Hex(str) {
+            const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+            return bytesToHex(buf);
+        }
+
+        // מפתח השוואה לשם פריט: אותיות קטנות, בלי סימני פיסוק, מילים ממוינות (כך שסדר מילים שונה לא ישבור התאמה)
+        function normalizeItemKey(name) {
+            return String(name || '').toLowerCase()
+                .replace(/["'`׳״.,()\-–_/\\*:;]/g, ' ')
+                .replace(/\s+/g, ' ').trim()
+                .split(' ').filter(Boolean).sort().join(' ');
+        }
+
+        function itemUnitPrice(it) {
+            const explicit = Number(it && it.unitPrice);
+            if (explicit > 0) return explicit;
+            const price = Math.abs(Number(it && it.price) || 0);
+            const qty = Math.abs(Number(it && it.quantity)) || 1;
+            return price / qty;
+        }
+
+        async function loadPriceBook(supplier) {
+            if (priceBookCache[supplier]) return priceBookCache[supplier];
+            const snap = await getDocs(query(getSettingsCollection(), where('supplier', '==', supplier)));
+            const map = {};
+            snap.forEach(d => {
+                if (!d.id.startsWith('price_book_')) return;
+                const x = d.data();
+                if (x && x.key) map[x.key] = x;
+            });
+            priceBookCache[supplier] = map;
+            return map;
+        }
+
+        // משווה את פריטי המסמך למחיר האחרון הידוע מאותו ספק. מחזיר { ups, downs }.
+        async function computePriceChanges(supplier, items, docDate) {
+            const ups = [], downs = [];
+            if (!supplier || !Array.isArray(items) || items.length === 0) return { ups, downs };
+            const book = await loadPriceBook(supplier);
+            items.forEach(it => {
+                const key = normalizeItemKey(it.name);
+                const unit = itemUnitPrice(it);
+                if (!key || !(unit > 0)) return;
+                const prev = book[key];
+                if (!prev || !(prev.unitPrice > 0)) return;
+                // מסמך ישן שנסרק באיחור - לא משווים למחיר שנרשם בתאריך מאוחר יותר
+                if (docDate && prev.date && prev.date > docDate) return;
+                const diff = unit - prev.unitPrice;
+                const pct = (diff / prev.unitPrice) * 100;
+                if (Math.abs(diff) < 0.01 || Math.abs(pct) < PRICE_ALERT_MIN_PERCENT) return;
+                const rec = {
+                    name: String(it.name || ''),
+                    oldPrice: round2(prev.unitPrice),
+                    newPrice: round2(unit),
+                    pct: Math.round(pct * 10) / 10,
+                    prevDate: prev.date || ''
+                };
+                (diff > 0 ? ups : downs).push(rec);
+            });
+            return { ups, downs };
+        }
+
+        // מעדכן את המחירון בעקבות מסמך שנשמר (חשבונית או תעודת משלוח)
+        async function updatePriceBook(supplier, items, docDate, source) {
+            if (!supplier || !Array.isArray(items) || items.length === 0) return;
+            const book = await loadPriceBook(supplier);
+            const date = docDate || new Date().toISOString().slice(0, 10);
+            const latest = {};
+            items.forEach(it => {
+                const key = normalizeItemKey(it.name);
+                const unit = itemUnitPrice(it);
+                if (key && unit > 0) latest[key] = { name: String(it.name || ''), unit: round2(unit) };
+            });
+            const batch = writeBatch(db);
+            let n = 0;
+            for (const key of Object.keys(latest)) {
+                const prev = book[key];
+                if (prev && prev.date && prev.date > date) continue; // כבר קיים מחיר חדש יותר
+                const { name, unit } = latest[key];
+                const history = Array.isArray(prev && prev.history) ? prev.history.slice() : [];
+                if (!prev || round2(prev.unitPrice) !== unit) history.push({ d: date, p: unit });
+                const rec = { supplier, name, key, unitPrice: unit, date, source: source || '', history: history.slice(-10), updatedAt: Date.now() };
+                const id = 'price_book_' + await sha256Hex(supplier + '|' + key);
+                batch.set(doc(getSettingsCollection(), id), rec);
+                book[key] = rec;
+                n++;
+            }
+            if (n > 0) await ackOrQueue(batch.commit(), 10000, "מחירון");
+        }
+
+        async function renamePriceBookSupplier(oldName, newName) {
+            const snap = await getDocs(query(getSettingsCollection(), where('supplier', '==', oldName)));
+            delete priceBookCache[oldName];
+            delete priceBookCache[newName];
+            for (const d of snap.docs) {
+                if (!d.id.startsWith('price_book_')) continue;
+                const x = d.data();
+                if (!x.key) continue;
+                const newId = 'price_book_' + await sha256Hex(newName + '|' + x.key);
+                await setDoc(doc(getSettingsCollection(), newId), { ...x, supplier: newName });
+                await deleteDoc(d.ref);
+            }
+        }
+
+        // מציג בטופס האישור את שינויי המחיר של המסמך הנוכחי (לפני שמירה)
+        async function refreshPriceAlerts(announce) {
+            const box = document.getElementById('priceAlertBox');
+            if (!box) return;
+            currentPriceChanges = { ups: [], downs: [] };
+            box.classList.add('hidden');
+            if (editingInvoiceId) return; // עריכת מסמך קיים - לא בודקים מחדש
+            const supplierEl = document.getElementById('invoiceSupplierSelect');
+            const supplier = supplierEl ? supplierEl.value : '';
+            if (!supplier || supplier === '__other__' || recognizedItemsList.length === 0) return;
+            const amount = parseFloat(document.getElementById('invoiceAmountInput').value);
+            if (amount < 0) return; // זיכוי/החזרה - לא בודקים עליית מחיר
+            const date = (document.getElementById('invoiceDateInput').value || '').trim();
+
+            let res;
+            try {
+                res = await computePriceChanges(supplier, recognizedItemsList, date);
+            } catch (e) {
+                console.warn("בדיקת שינויי מחיר נכשלה:", e);
+                return;
+            }
+            if (supplierEl.value !== supplier) return; // הספק הוחלף בזמן הבדיקה
+            currentPriceChanges = res;
+            if (res.ups.length === 0 && res.downs.length === 0) return;
+
+            const fmtDate = d => d ? ' <span style="opacity:0.75; font-size:0.9em;">(מחיר קודם מ-' + esc(d.split('-').reverse().join('/')) + ')</span>' : '';
+            let html = '';
+            if (res.ups.length) {
+                html += `<div style="font-weight:bold; margin-bottom:4px;">📈 עלייה במחיר ליחידה לעומת הרכישה הקודמת (${res.ups.length} פריטים):</div>`
+                    + res.ups.map(u => `<div>• <b>${esc(u.name)}</b>: ${u.oldPrice.toFixed(2)} ← <b>${u.newPrice.toFixed(2)} ₪</b> (+${u.pct}%)${fmtDate(u.prevDate)}</div>`).join('');
+            }
+            if (res.downs.length) {
+                html += `<div style="font-weight:bold; margin:${res.ups.length ? '8px' : '0'} 0 4px 0; color:#1e7e34;">📉 ירידה במחיר (${res.downs.length} פריטים):</div>`
+                    + res.downs.map(u => `<div style="color:#1e7e34;">• <b>${esc(u.name)}</b>: ${u.oldPrice.toFixed(2)} ← <b>${u.newPrice.toFixed(2)} ₪</b> (${u.pct}%)${fmtDate(u.prevDate)}</div>`).join('');
+            }
+            box.style.background = res.ups.length ? '#fdecea' : '#eaf7ee';
+            box.style.border = res.ups.length ? '1px solid #f5c6cb' : '1px solid #c3e6cb';
+            box.style.color = res.ups.length ? '#842029' : '#1e7e34';
+            box.innerHTML = html;
+            box.classList.remove('hidden');
+
+            if (announce && res.ups.length) {
+                alert(`📈 שים לב: עלייה במחיר ב-${res.ups.length} פריטים אצל ${supplier}!\n(הפירוט מופיע בטופס)`);
+            }
+        }
+
+        // כרטיס "שינויי מחיר החודש" - מקבץ את ההתראות ששמורות על חשבוניות ותעודות החודש
+        function renderPriceAlertsCard() {
+            const card = document.getElementById('priceAlertsCard');
+            const list = document.getElementById('priceAlertsList');
+            if (!card || !list) return;
+            const rows = [];
+            const collect = (docs, label) => docs.forEach(d => (Array.isArray(d.priceAlerts) ? d.priceAlerts : []).forEach(a => {
+                rows.push({ ...a, supplier: d.supplier, label, docNo: d.invoiceNumber || '' });
+            }));
+            collect(monthlyInvoices, 'חשבונית');
+            collect(monthlyNotes, 'תעודה');
+            if (rows.length === 0) { card.classList.add('hidden'); list.innerHTML = ''; return; }
+            rows.sort((a, b) => (b.pct || 0) - (a.pct || 0));
+            list.innerHTML = `<table>
+                <thead><tr><th>ספק</th><th>פריט</th><th>מחיר קודם</th><th>מחיר חדש</th><th>שינוי</th><th>מקור</th></tr></thead>
+                <tbody>${rows.map(r => `<tr>
+                    <td>${esc(r.supplier)}</td>
+                    <td>${esc(r.name)}</td>
+                    <td>${Number(r.oldPrice).toFixed(2)} ₪</td>
+                    <td style="font-weight:bold;">${Number(r.newPrice).toFixed(2)} ₪</td>
+                    <td style="color:#d9534f; font-weight:bold;">+${esc(r.pct)}%</td>
+                    <td>${esc(r.label)}${r.docNo ? ' ' + esc(r.docNo) : ''}</td>
+                </tr>`).join('')}</tbody>
+            </table>`;
+            card.classList.remove('hidden');
+        }
+
+        // =====================================================================
+        // תעודות משלוח: שמירה, רשימה והתאמה לחשבונית מרכזת
+        // תעודות נשמרות באותו אוסף של החשבוניות עם docType = 'delivery_note'
+        // (השדה invoiceNumber משמש כמספר התעודה) ולכן לא נכללות בסיכומי החשבוניות והדוחות.
+        // =====================================================================
+        async function saveDeliveryNoteEntry() {
+            const saveBtn = document.getElementById('saveInvoiceBtn');
+            const supplierSel = document.getElementById('invoiceSupplierSelect');
+            let supplier = supplierSel.value;
+            if (!supplier) { alert("אנא בחר ספק."); return; }
+            if (supplier === '__other__') {
+                const custom = await appPrompt("הקלד את שם הספק:");
+                if (!custom || !custom.trim()) { alert("אנא הכנס שם ספק."); return; }
+                supplier = custom.trim();
+                if (!suppliersList.includes(supplier)) {
+                    suppliersList.push(supplier);
+                    try { await ackOrQueue(setDoc(getSettingsDoc("suppliers_list"), { suppliers: suppliersList }), 8000, "רשימת ספקים"); } catch(e){}
+                }
+            }
+            await learnSupplierAlias(supplier);
+
+            const noteNumber = document.getElementById('invoiceNumberInput').value.trim();
+            const noteDate = (document.getElementById('invoiceDateInput').value || '').trim();
+            const notes = document.getElementById('invoiceNotesInput').value.trim();
+            const items = recognizedItemsList;
+
+            let amount = parseFloat(document.getElementById('invoiceAmountInput').value);
+            if (isNaN(amount)) {
+                const sum = items.reduce((t, it) => t + (Number(it.price) || 0), 0);
+                amount = sum > 0 ? round2(sum) : 0;
+                if (amount === 0 && !await appConfirm("לא הוזן סכום לתעודה ולא זוהו מחירי פריטים.\nלשמור תעודה ללא סכום? (היא לא תיכלל בסכום ההתאמה לחשבונית)")) return;
+            }
+
+            const selectedMonth = getSelectedInvoiceMonth();
+            const monthKey = noteDate ? noteDate.slice(0, 7) : selectedMonth;
+            const isUpdate = Boolean(editingInvoiceId);
+
+            if (noteDate && monthKey !== selectedMonth) {
+                const [dy, dm, dd] = noteDate.split('-');
+                const [my, mm] = monthKey.split('-');
+                if (!await appConfirm(`תאריך התעודה הוא ${dd}/${dm}/${dy}, ולכן היא תישמר בחודש ${mm}/${my} (ולא בחודש שמוצג עכשיו).\nלהמשיך?`)) return;
+            }
+
+            if (!isUpdate && noteNumber) {
+                let compareList = monthlyNotes;
+                if (monthKey !== selectedMonth) {
+                    try {
+                        const snapCmp = await getDocs(query(getInvoicesCollection(), where("monthKey", "==", monthKey)));
+                        compareList = snapCmp.docs.map(d => d.data()).filter(x => x.docType === 'delivery_note');
+                    } catch (e) { compareList = []; }
+                }
+                const dup = compareList.some(n => n.supplier === supplier && String(n.invoiceNumber || '').trim() === noteNumber);
+                if (dup && !await appConfirm(`⚠️ תעודה מספר ${noteNumber} של ${supplier} כבר קיימת במערכת.\nלשמור בכל זאת?`)) return;
+            }
+
+            if (saveBtn) { saveBtn.disabled = true; saveBtn.innerText = "שומר..."; }
+
+            try {
+                const noteId = editingInvoiceId || makeInvoiceId();
+                const data = { id: noteId, docType: 'delivery_note', supplier, invoiceNumber: noteNumber, invoiceDate: noteDate, amount, notes, monthKey, items, handwrittenNotes: keptHandwrittenNotes() };
+                if (!isUpdate) {
+                    data.createdAt = Date.now();
+                    if (recognizedImageBase64) data.pageCount = recognizedPageCount;
+                    if (amount >= 0) {
+                        try { data.priceAlerts = (await computePriceChanges(supplier, items, noteDate)).ups; } catch (e) { /* לא קריטי */ }
+                    }
+                } else {
+                    data.updatedAt = Date.now();
+                }
+
+                if (recognizedImageBase64) {
+                    const imgToUpload = recognizedImageBase64;
+                    (async () => {
+                        try {
+                            const imgRef = storageRef(storage, `${RESTAURANT_ID}/invoices/dn_${noteId}.jpg`);
+                            await withTimeout(uploadString(imgRef, imgToUpload, 'data_url'), 30000, "העלאת תמונה");
+                            const imageUrl = await withTimeout(getDownloadURL(imgRef), 15000, "קבלת קישור לתמונה");
+                            await setDoc(doc(getInvoicesCollection(), noteId), { imageUrl }, { merge: true });
+                            if (getSelectedInvoiceMonth() === monthKey) loadInvoicesForMonth();
+                        } catch (imgErr) {
+                            console.warn("שמירת תמונת התעודה נכשלה, התעודה נשמרה בלי תמונה:", imgErr);
+                        }
+                    })();
+                }
+
+                await ackOrQueue(setDoc(doc(getInvoicesCollection(), noteId), data, { merge: true }), 20000, "שמירת התעודה");
+                if (!isUpdate && amount >= 0) {
+                    try { await updatePriceBook(supplier, items, noteDate, 'delivery_note'); } catch (e) { console.warn("עדכון מחירון נכשל:", e); }
+                }
+
+                document.getElementById('invoiceConfirmForm').classList.add('hidden');
+                recognizedImageBase64 = null;
+                recognizedItemsList = [];
+                handwrittenNotesList = [];
+                editingInvoiceId = null;
+                scanMode = 'invoice';
+                alert(isUpdate ? (editingOriginalKind === 'invoice' ? "החשבונית הומרה לתעודת משלוח בהצלחה!" : "התעודה עודכנה בהצלחה!") : "התעודה נשמרה בהצלחה!");
+                if (monthKey !== selectedMonth) {
+                    const monthEl = document.getElementById('invoiceMonthSelect');
+                    if (monthEl) monthEl.value = monthKey;
+                    customReportEdits = {};
+                }
+                loadInvoicesForMonth();
+            } catch (e) {
+                alert("שגיאה בשמירת התעודה: " + (e && e.message ? e.message : "שגיאה לא ידועה") + "\nניתן לנסות שוב.");
+            } finally {
+                if (saveBtn) { saveBtn.disabled = false; saveBtn.innerText = isUpdate ? "עדכן תעודה" : "שמור תעודה"; }
+            }
+        }
+
+        window.editDeliveryNote = function(noteId) {
+            const n = monthlyNotes.find(x => x.id === noteId);
+            if (!n) return;
+            scanMode = 'delivery';
+            recognizedImageBase64 = null;
+            openInvoiceConfirmForm(null, n);
+        };
+
+        window.deleteDeliveryNote = async function(noteId) {
+            if (!await appConfirm("למחוק את תעודת המשלוח הזו?")) return;
+            try {
+                const n = monthlyNotes.find(x => x.id === noteId);
+                await ackOrQueue(deleteDoc(doc(getInvoicesCollection(), noteId)), 15000, "מחיקה");
+                if (n && n.imageUrl) {
+                    for (const path of [`dn_${noteId}.jpg`, `${noteId}.jpg`]) { try { await deleteObject(storageRef(storage, `${RESTAURANT_ID}/invoices/${path}`)); } catch(e) { /* לא קריטי */ } }
+                }
+                loadInvoicesForMonth();
+            } catch(e) { alert("שגיאה במחיקת התעודה."); }
+        };
+
+        function renderDeliveryNotes() {
+            const tbody = document.getElementById('deliveryNotesTableBody');
+            if (!tbody) return;
+            const notes = monthlyNotes.slice().sort((a, b) =>
+                (a.supplier || '').localeCompare(b.supplier || '', 'he') ||
+                String(a.invoiceDate || '').localeCompare(String(b.invoiceDate || '')));
+
+            if (notes.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="5" style="color:#888;">אין תעודות משלוח לחודש זה.</td></tr>';
+            } else {
+                tbody.innerHTML = notes.map(n => {
+                    const amt = Number(n.amount) || 0;
+                    const itemsCount = Array.isArray(n.items) ? n.items.length : 0;
+                    return `
+                        <tr class="${amt < 0 ? 'credit-row' : ''}">
+                            <td>${esc(n.supplier)}</td>
+                            <td>${esc(n.invoiceNumber || '-')}${n.invoiceDate ? `<br><span style="font-size:0.8em; color:#777;">${esc(n.invoiceDate.split('-').reverse().join('/'))}</span>` : ''}</td>
+                            <td class="${amt < 0 ? 'credit-badge' : ''}">${amt !== 0 ? amt.toFixed(2) + ' ₪' : '-'}</td>
+                            <td>${itemsCount > 0 ? itemsCount + ' פריטים' : '-'}${handwrittenBadgeHtml(n)}</td>
+                            <td style="white-space:nowrap;">
+                                ${n.imageUrl ? `<button class="view-img-btn" data-url="${esc(n.imageUrl)}" onclick="openImageViewer(this.dataset.url)">📷 תמונה</button>` : ''}
+                                <button class="edit-btn" data-id="${esc(n.id)}" onclick="editDeliveryNote(this.dataset.id)">ערוך</button>
+                                <button class="delete-btn" data-id="${esc(n.id)}" onclick="deleteDeliveryNote(this.dataset.id)">מחק</button>
+                            </td>
+                        </tr>`;
+                }).join('');
+            }
+
+            const sel = document.getElementById('deliveryMatchSupplier');
+            if (sel) {
+                const prev = sel.value;
+                const supps = [...new Set(notes.map(n => n.supplier))];
+                sel.innerHTML = '<option value="">-- בחר ספק --</option>' + supps.map(x => `<option value="${esc(x)}">${esc(x)}</option>`).join('');
+                if (prev && supps.includes(prev)) sel.value = prev;
+            }
+            renderDeliveryMatch();
+        }
+
+        function aggregateItemsByKey(docs) {
+            const map = {};
+            docs.forEach(d => {
+                if (!Array.isArray(d.items)) return;
+                d.items.forEach(it => {
+                    const key = normalizeItemKey(it.name);
+                    if (!key) return;
+                    const qty = Math.abs(Number(it.quantity)) || 1;
+                    const price = Math.abs(Number(it.price)) || 0;
+                    if (!map[key]) map[key] = { name: String(it.name), qty: 0, total: 0 };
+                    map[key].qty += qty;
+                    map[key].total += price;
+                });
+            });
+            return map;
+        }
+
+        // בודק שסכום התעודות של ספק (ופריטיהן) תואם לחשבונית המרכזת של אותו חודש
+        window.renderDeliveryMatch = function() {
+            const supSel = document.getElementById('deliveryMatchSupplier');
+            const invWrap = document.getElementById('consolidatedInvoiceWrap');
+            const invSel = document.getElementById('consolidatedInvoiceSelect');
+            const out = document.getElementById('deliveryMatchResult');
+            if (!supSel || !out) return;
+
+            const supplier = supSel.value;
+            if (!supplier) { out.innerHTML = ''; invWrap.classList.add('hidden'); return; }
+
+            const notes = monthlyNotes.filter(n => n.supplier === supplier);
+            const notesTotal = round2(notes.reduce((t, n) => t + (Number(n.amount) || 0), 0));
+            const noAmountCount = notes.filter(n => !(Math.abs(Number(n.amount)) > 0)).length;
+            const invoices = monthlyInvoices.filter(i => i.supplier === supplier && (Number(i.amount) || 0) > 0);
+
+            const box = (bg, border, color, html) => `<div style="background:${bg}; border:1px solid ${border}; color:${color}; border-radius:8px; padding:8px; margin-top:8px; font-size:0.85em; text-align:right;">${html}</div>`;
+
+            if (invoices.length === 0) {
+                invWrap.classList.add('hidden');
+                out.innerHTML = box('#fff3cd', '#ffeeba', '#856404',
+                    `עדיין לא נקלטה חשבונית לספק זה בחודש הנוכחי.<br>סה"כ ${notes.length} תעודות עד כה: <b>${notesTotal.toFixed(2)} ₪</b>`);
+                return;
+            }
+
+            const prevChoice = invSel.value;
+            invSel.innerHTML = `<option value="__all__">כל חשבוניות הספק החודש (${invoices.length})</option>`
+                + invoices.map(inv => `<option value="${esc(inv.id)}">${esc(inv.invoiceNumber || 'ללא מספר')} - ${(Number(inv.amount) || 0).toFixed(2)} ₪</option>`).join('');
+            const valid = prevChoice === '__all__' || invoices.some(i => i.id === prevChoice);
+            invSel.value = valid ? prevChoice : (invoices.length === 1 ? invoices[0].id : '__all__');
+            invWrap.classList.remove('hidden');
+
+            const chosen = invSel.value === '__all__' ? invoices : invoices.filter(i => i.id === invSel.value);
+            const invoiceTotal = round2(chosen.reduce((t, i) => t + (Number(i.amount) || 0), 0));
+            const diff = round2(invoiceTotal - notesTotal);
+            const tolerance = Math.max(2, invoiceTotal * 0.005);
+            const diffWithVat = round2(invoiceTotal - notesTotal * (1 + CURRENT_VAT_RATE));
+
+            let statusHtml;
+            if (Math.abs(diff) <= tolerance) {
+                statusHtml = box('#eaf7ee', '#c3e6cb', '#1e7e34', '✅ <b>הסכומים תואמים.</b>');
+            } else if (Math.abs(diffWithVat) <= tolerance) {
+                statusHtml = box('#eaf7ee', '#c3e6cb', '#1e7e34', `✅ <b>תואם</b> - סכומי התעודות ללא מע"מ (${round2(notesTotal * (1 + CURRENT_VAT_RATE)).toFixed(2)} ₪ אחרי מע"מ).`);
+            } else if (diff > 0) {
+                statusHtml = box('#f8d7da', '#f5c6cb', '#721c24', `❌ <b>אין התאמה:</b> בחשבונית <b>${diff.toFixed(2)} ₪ יותר</b> מסכום התעודות. ייתכן שתעודה לא נסרקה, או שהספק חייב בסכום גבוה מהמצופה.`);
+            } else {
+                statusHtml = box('#f8d7da', '#f5c6cb', '#721c24', `❌ <b>אין התאמה:</b> בחשבונית <b>${Math.abs(diff).toFixed(2)} ₪ פחות</b> מסכום התעודות. ייתכן שתעודה לא נכללה בחשבונית, או שחסר זיכוי.`);
+            }
+
+            const warnings = [];
+            if (noAmountCount > 0) warnings.push(`${noAmountCount} תעודות ללא סכום לא נספרו בסיכום - בדוק אותן ידנית.`);
+            const numCount = {};
+            notes.forEach(n => { const k = String(n.invoiceNumber || '').trim(); if (k) numCount[k] = (numCount[k] || 0) + 1; });
+            const dupNums = Object.keys(numCount).filter(k => numCount[k] > 1);
+            if (dupNums.length > 0) warnings.push(`מספרי תעודה שנקלטו יותר מפעם אחת: ${dupNums.map(esc).join(', ')} (ייתכן שנסרקו פעמיים).`);
+            const warnHtml = warnings.length ? box('#fff3cd', '#ffeeba', '#856404', warnings.map(w => '⚠️ ' + w).join('<br>')) : '';
+
+            // השוואה ברמת פריט (רק אם גם בחשבונית וגם בתעודות זוהו פריטים)
+            const nMap = aggregateItemsByKey(notes);
+            const iMap = aggregateItemsByKey(chosen);
+            let itemsHtml = '';
+            if (Object.keys(iMap).length === 0) {
+                itemsHtml = '<div style="font-size:0.8em; color:#666; margin-top:8px;">בחשבונית לא זוהו פריטים מפורטים - נבדק הסכום בלבד.</div>';
+            } else if (Object.keys(nMap).length === 0) {
+                itemsHtml = '<div style="font-size:0.8em; color:#666; margin-top:8px;">בתעודות לא זוהו פריטים - נבדק הסכום בלבד.</div>';
+            } else {
+                const diffs = [];
+                const fq = q => String(Math.round(q * 1000) / 1000);
+                new Set([...Object.keys(nMap), ...Object.keys(iMap)]).forEach(k => {
+                    const n = nMap[k], i = iMap[k];
+                    if (n && !i) { diffs.push(`<b>${esc(n.name)}</b> - קיים בתעודות בלבד (כמות ${fq(n.qty)})`); return; }
+                    if (i && !n) { diffs.push(`<b>${esc(i.name)}</b> - קיים בחשבונית בלבד (כמות ${fq(i.qty)})`); return; }
+                    if (Math.abs(n.qty - i.qty) > 0.001) diffs.push(`<b>${esc(n.name)}</b> - כמות: ${fq(n.qty)} בתעודות, ${fq(i.qty)} בחשבונית`);
+                    const nu = n.qty ? n.total / n.qty : 0, iu = i.qty ? i.total / i.qty : 0;
+                    if (nu > 0 && iu > 0 && Math.abs(iu - nu) / nu > 0.01) {
+                        const pct = Math.round((iu - nu) / nu * 1000) / 10;
+                        diffs.push(`<b>${esc(n.name)}</b> - מחיר ליחידה: ${nu.toFixed(2)} בתעודות, ${iu.toFixed(2)} בחשבונית (${pct > 0 ? '+' : ''}${pct}%)`);
+                    }
+                });
+                if (diffs.length === 0) {
+                    itemsHtml = box('#eaf7ee', '#c3e6cb', '#1e7e34', '✅ גם הפריטים, הכמויות והמחירים תואמים.');
+                } else {
+                    itemsHtml = box('#fff3cd', '#ffeeba', '#856404',
+                        `<b>הבדלים ברמת פריט (${diffs.length}):</b><br>` + diffs.slice(0, 40).map(d => '• ' + d).join('<br>')
+                        + (diffs.length > 40 ? `<br>ועוד ${diffs.length - 40}...` : '')
+                        + '<br><span style="font-size:0.9em; opacity:0.8;">שים לב: הבדלי ניסוח בשמות פריטים עלולים ליצור הפרשים מדומים.</span>');
+                }
+            }
+
+            out.innerHTML = `
+                <div style="background:#fff; border:1px solid #ddd; border-radius:8px; padding:8px; margin-top:8px; font-size:0.9em;">
+                    <div>סה"כ תעודות (${notes.length}): <b>${notesTotal.toFixed(2)} ₪</b></div>
+                    <div>החשבונית המרכזת: <b>${invoiceTotal.toFixed(2)} ₪</b></div>
+                    <div>הפרש: <b style="color:${(Math.abs(diff) <= tolerance || Math.abs(diffWithVat) <= tolerance) ? '#27ae60' : '#d9534f'};">${diff.toFixed(2)} ₪</b></div>
+                </div>
+                ${statusHtml}${warnHtml}${itemsHtml}`;
+        };
+
+        // מקטין/מכווץ תמונה בצד הלקוח לפני שליחה, כדי לצמצם משמעותית את זמן ההעלאה
+        // (תמונות שצולמו בטלפון מגיעות לרוב בכמה MB - בלי כיווץ ההעלאה איטית מאוד).
+        // הרוחב/גובה המקסימליים (1600px) והאיכות (0.85) עדיין נותנים ל-AI טקסט קריא לזיהוי.
+        // רזולוציה/איכות מוקטנות למינימום שעדיין נותן ל-AI טקסט קריא בחשבונית ממוצעת.
+        // 1280px זו בערך תקרת הרזולוציה הפנימית שרוב מודלי הראייה משתמשים בה בכל מקרה,
+        // ואיכות 0.75 עדיין שומרת על קריאות ספרות/טקסט תוך צמצום משמעותי בגודל הקובץ.
+        const MAX_UPLOAD_DIMENSION = 2000;   // הועלה מ-1280: ספרות קטנות (6/4) וכתב יד אבדו בכיווץ
+        const UPLOAD_JPEG_QUALITY = 0.88;
+
+        function fileToBase64(file) {
+            return new Promise((resolve, reject) => {
+                const img = new Image();
+                const objectUrl = URL.createObjectURL(file);
+
+                img.onload = () => {
+                    URL.revokeObjectURL(objectUrl);
+
+                    let { width, height } = img;
+                    if (width > MAX_UPLOAD_DIMENSION || height > MAX_UPLOAD_DIMENSION) {
+                        const scale = MAX_UPLOAD_DIMENSION / Math.max(width, height);
+                        width = Math.round(width * scale);
+                        height = Math.round(height * scale);
+                    }
+
+                    const canvas = document.createElement('canvas');
+                    canvas.width = width;
+                    canvas.height = height;
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0, width, height);
+
+                    resolve(canvas.toDataURL('image/jpeg', UPLOAD_JPEG_QUALITY).split(',')[1]);
+                };
+
+                img.onerror = () => {
+                    URL.revokeObjectURL(objectUrl);
+                    // גיבוי: אם הדפדפן לא הצליח לפענח את הקובץ כתמונה, שלח כמו שהוא בלי כיווץ
+                    const reader = new FileReader();
+                    reader.onload = () => resolve(reader.result.split(',')[1]);
+                    reader.onerror = reject;
+                    reader.readAsDataURL(file);
+                };
+
+                img.src = objectUrl;
+            });
+        }
+
+        // ממיר את כל עמודי ה-PDF (עד maxPages) לתמונות JPEG נפרדות, כדי שכל עמוד יזוהה בקריאה משלו
+        async function pdfFileToPagesBase64(file, maxPages) {
+            const arrayBuffer = await file.arrayBuffer();
+            const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+            const count = Math.min(pdf.numPages, maxPages);
+            const pages = [];
+            for (let i = 1; i <= count; i++) {
+                const page = await pdf.getPage(i);
+                const viewport = page.getViewport({ scale: 2 });
+                const canvas = document.createElement('canvas');
+                canvas.width = viewport.width;
+                canvas.height = viewport.height;
+                const ctx = canvas.getContext('2d');
+                await page.render({ canvasContext: ctx, viewport }).promise;
+                pages.push(canvas.toDataURL('image/jpeg', 0.9).split(',')[1]);
+            }
+            return { pages, truncated: pdf.numPages > count };
+        }
+
+        // מקבל קובץ אחד או יותר (תמונות ו/או PDF) - כל תמונה/עמוד נחשב עמוד של אותו מסמך
+        async function handleScanFiles(event, mode) {
+            const files = Array.from(event.target.files || []);
+            if (files.length === 0) return;
+            scanMode = mode;
+            try {
+                const pages = [];
+                let truncated = false;
+                for (const file of files) {
+                    const room = MAX_SCAN_PAGES - pages.length;
+                    if (room <= 0) { truncated = true; break; }
+                    const isPdf = (file.type === 'application/pdf') || /\.pdf$/i.test(file.name || '');
+                    if (isPdf) {
+                        const r = await pdfFileToPagesBase64(file, room);
+                        pages.push(...r.pages);
+                        if (r.truncated) truncated = true;
+                    } else {
+                        pages.push(await fileToBase64(file));
+                    }
+                }
+                if (truncated) alert(`המסמך ארוך מ-${MAX_SCAN_PAGES} עמודים - נסרקו ${MAX_SCAN_PAGES} העמודים הראשונים בלבד.`);
+                await processScanPages(pages);
+            } finally {
+                event.target.value = '';
+            }
+        }
+
+        // ---- הוספת עמודים למסמך שכבר נסרק (אחרי שהטופס נפתח) ----
+        window.startAddPageCamera = function() {
+            if (currentScanPages.length >= MAX_SCAN_PAGES) { alert(`הגעת למקסימום של ${MAX_SCAN_PAGES} עמודים במסמך.`); return; }
+            openCameraModal(scanMode, false, true);
+        };
+
+        async function addPagesToCurrentScan(newPages) {
+            if (!newPages || !newPages.length || currentScanPages.length === 0) return;
+            const room = MAX_SCAN_PAGES - currentScanPages.length;
+            if (room <= 0) { alert(`הגעת למקסימום של ${MAX_SCAN_PAGES} עמודים במסמך.`); return; }
+            if (newPages.length > room) { newPages = newPages.slice(0, room); alert(`נוספו רק ${room} עמודים (מקסימום ${MAX_SCAN_PAGES} במסמך).`); }
+
+            const recognizingEl = document.getElementById('invoiceRecognizing');
+            if (!recognizingEl.dataset.baseText) recognizingEl.dataset.baseText = recognizingEl.innerText;
+            recognizingEl.classList.remove('hidden');
+            setRecognitionControlsDisabled(true);
+            try {
+                const newResults = [];
+                for (let i = 0; i < newPages.length; i++) {
+                    recognizingEl.innerText = `⏳ מעבד עמוד נוסף ${i + 1} מתוך ${newPages.length}...`;
+                    try { newResults.push(await recognizeOnePage(newPages[i])); }
+                    catch (err) { throw new Error(`עמוד נוסף ${i + 1}: ${err.message}`); }
+                }
+                const allPages = currentScanPages.concat(newPages);
+                const allResults = currentScanResults.concat(newResults);
+                const merged = mergePageResults(allResults);
+                if (merged.isCredit && merged.amount > 0) merged.amount = -Math.abs(merged.amount);
+
+                currentScanPages = allPages;
+                currentScanResults = allResults;
+                recognizedPageCount = allPages.length;
+                recognizedImageBase64 = await buildScanPreview(allPages);
+                document.getElementById('invoicePreviewImgWrap').innerHTML =
+                    `<div style="max-height:280px; overflow-y:auto; border:1px solid #ddd; border-radius:8px;"><img src="${recognizedImageBase64}" style="width:100%; display:block;"></div><div style="font-size:0.75em; color:#555; margin-top:2px;">${recognizedPageCount} עמודים - גלול לצפייה</div>`;
+
+                // פריטים: מאוחדים מכל העמודים
+                recognizedItemsList = Array.isArray(merged.items) ? merged.items : [];
+                document.getElementById('invoiceItemsDisplay').innerHTML = recognizedItemsList.length
+                    ? recognizedItemsList.map(it => `• <b>${esc(it.name)}</b> - כמות: ${esc(it.quantity || 1)}${it.price ? ' (' + it.price + ' ₪)' : ''}`).join('<br>')
+                    : 'לא זוהו פרטים בשרת.';
+
+                // סכום: מתעדכן רק אם המשתמש לא שינה אותו ידנית
+                const amountInput = document.getElementById('invoiceAmountInput');
+                if (typeof merged.amount === 'number' && (amountInput.value === '' || Number(amountInput.value) === lastAutoAmount)) {
+                    amountInput.value = merged.amount;
+                    lastAutoAmount = merged.amount;
+                }
+                // שדות כותרת: ממלאים רק ריקים
+                const numberInput = document.getElementById('invoiceNumberInput');
+                if (!numberInput.value.trim() && merged.invoiceNumber) numberInput.value = merged.invoiceNumber;
+                const dateInput = document.getElementById('invoiceDateInput');
+                if (!dateInput.value && isValidIsoDate(merged.invoiceDate)) dateInput.value = merged.invoiceDate;
+                const payInput = document.getElementById('invoicePaymentMethodInput');
+                if (!payInput.value.trim() && merged.paymentMethod) payInput.value = merged.paymentMethod;
+                const supSel = document.getElementById('invoiceSupplierSelect');
+                if (!supSel.value && merged.supplier) {
+                    const m = matchSupplier(String(merged.supplier), String(merged.taxId || ''));
+                    if (m) supSel.value = m;
+                }
+
+                // כתב יד מהעמודים החדשים נוסף לרשימה
+                const addedNotes = normalizeHandwrittenNotes(newResults.reduce((acc, r) => acc.concat(Array.isArray(r.handwrittenNotes) ? r.handwrittenNotes : []), []));
+                handwrittenNotesList = handwrittenNotesList.concat(addedNotes);
+                renderHandwrittenBox();
+                const hwStatus = document.getElementById('handwritingStatus');
+                if (hwStatus && handwrittenNotesList.length) hwStatus.innerHTML = '';
+
+                const mismatchBox = document.getElementById('mismatchWarningBox');
+                if (mismatchBox) mismatchBox.classList.toggle('hidden', !itemsMismatchTotal(merged));
+                refreshDateHint(); refreshNumberHint();
+                refreshPriceAlerts(true);
+            } catch (err) {
+                alert("פירוט השגיאה: " + err.message);
+            } finally {
+                recognizingEl.innerText = recognizingEl.dataset.baseText;
+                recognizingEl.classList.add('hidden');
+                setRecognitionControlsDisabled(false);
+            }
+        }
+
+        async function handleAddPageFiles(event) {
+            const files = Array.from(event.target.files || []);
+            try {
+                if (!files.length) return;
+                const room = MAX_SCAN_PAGES - currentScanPages.length;
+                const pages = [];
+                for (const file of files) {
+                    const left = room - pages.length;
+                    if (left <= 0) break;
+                    const isPdf = (file.type === 'application/pdf') || /\.pdf$/i.test(file.name || '');
+                    if (isPdf) pages.push(...(await pdfFileToPagesBase64(file, left)).pages);
+                    else pages.push(await fileToBase64(file));
+                }
+                await addPagesToCurrentScan(pages);
+            } finally {
+                event.target.value = '';
+            }
+        }
+
+        async function handleInvoiceFile(event) { return handleScanFiles(event, 'invoice'); }
+
+        // כתובת ה-Cloud Function שמבצעת את הזיהוי בפועל (שומרת את מפתח ה-AI בצד שרת, לא בדפדפן).
+        // יש להחליף בכתובת האמיתית לאחר פריסת הפונקציה recognizeInvoice (ראו קובץ הפונקציה הנפרד).
+        const RECOGNIZE_FUNCTION_URL = "https://recognizeinvoice-vngzfxix3a-uc.a.run.app";
+
+        function setRecognitionControlsDisabled(disabled) {
+            document.querySelectorAll('[data-recognition-trigger]').forEach(btn => btn.disabled = disabled);
+            const fileInput = document.getElementById('fileUploadInput');
+            if (fileInput) fileInput.disabled = disabled;
+            const deliveryInput = document.getElementById('deliveryFileInput');
+            if (deliveryInput) deliveryInput.disabled = disabled;
+        }
+
+        // בודק אם סכום הפריטים שזוהו רחוק מהסכום הכולל - סימן שה-AI כנראה פספס או המציא פרטים
+        // שיעור המע"מ הנוכחי בישראל (2026). בהרבה חשבוניות שורות הפריטים מוצגות לפני מע"מ,
+        // בעוד הסכום הכולל המדווח כולל מע"מ - זה תקין ולא "פער" אמיתי, וצריך לזהות את הדפוס הזה.
+        const CURRENT_VAT_RATE = 0.18;
+
+        function itemsMismatchTotal(parsed) {
+            if (!parsed || !Array.isArray(parsed.items) || parsed.items.length === 0) return false;
+            if (typeof parsed.amount !== 'number') return false;
+
+            // אם רוב הפריטים לא כוללים מחיר בכלל (זיהוי חלקי בלבד, נפוץ בחשבוניות שירותים/אגרות
+            // שאינן מפורטות כרשימת מוצרים) - אין בסיס אמין להשוואה, ולא נכון להתריע.
+            const itemsWithPrice = parsed.items.filter(it => Number(it.price) > 0).length;
+            if (itemsWithPrice < Math.ceil(parsed.items.length / 2)) return false;
+
+            const itemsSum = Math.abs(parsed.items.reduce((sum, it) => sum + (Number(it.price) || 0), 0));
+            if (itemsSum === 0) return false; // מחירי הפריטים לא זוהו כלל - אין למה להשוות
+
+            const amount = Math.abs(parsed.amount);
+            // סף גמיש: הפער המותר הוא הגדול מבין 3% מהסכום הכולל או 2 ₪ (עיגולים/הנחות קטנות לא ייחשבו לפער)
+            const tolerance = Math.max(2, amount * 0.03);
+
+            const matchesAsIs = Math.abs(itemsSum - amount) <= tolerance;
+            // דפוס נפוץ: מחירי הפריטים לפני מע"מ, הסכום הכולל אחרי מע"מ - זה תקין ולא פער אמיתי
+            const matchesWithVatAdded = Math.abs((itemsSum * (1 + CURRENT_VAT_RATE)) - amount) <= tolerance;
+
+            return !(matchesAsIs || matchesWithVatAdded);
+        }
+
+        // הנחיות נוספות לשרת (נשלחות בשדה extraInstructions - ראה גם server-prompt-addendum.txt)
+        const EXTRA_OCR_INSTRUCTIONS =
+            "Digits 4 and 6 are easily confused in dates and document numbers: look at the closed loop of 6 vs the open/angled top of 4, and read each digit separately. " +
+            "Dates in Israeli documents are DD/MM/YYYY (or DD.MM.YY). Return invoiceDate as YYYY-MM-DD. " +
+            "The document title decides docType: 'תעודת משלוח' / 'תעודת אספקה' = delivery_note; 'חשבונית' / 'חשבונית מס' / 'חשבונית זיכוי' = invoice. " +
+            "Report ANY handwriting (ink pen / pencil) in handwrittenNotes: 'חסר', 'לא סופק', 'אזל', crossed-out or overwritten quantities (printedQty -> handwrittenQty), and free notes. Return [] if none.";
+
+        let currentScanMeta = null;   // תוצאות אימות בין שתי קריאות (תאריך/מספר/סוג/כתב יד) לסריקה הנוכחית
+
+        // חיתוך החלק העליון של העמוד (כותרת: סוג מסמך, מספר, תאריך) - כך המודל רואה אותו בגדול יותר
+        function cropPageHeader(base64, fraction = 0.4) {
+            return new Promise((resolve, reject) => {
+                const im = new Image();
+                im.onload = () => {
+                    const h = Math.round(im.height * fraction);
+                    const c = document.createElement('canvas');
+                    c.width = im.width; c.height = h;
+                    c.getContext('2d').drawImage(im, 0, 0, im.width, h, 0, 0, im.width, h);
+                    resolve(c.toDataURL('image/jpeg', 0.92).split(',')[1]);
+                };
+                im.onerror = reject;
+                im.src = `data:image/jpeg;base64,${base64}`;
+            });
+        }
+
+        function isValidIsoDate(s) {
+            if (typeof s !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+            const d = new Date(s + 'T00:00:00Z');
+            return !isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
+        }
+        function fmtIsoDate(s) { return s.split('-').reverse().join('/'); }
+
+        // הערכת סבירות תאריך: עתידי / מחוץ לחודש הנבחר / ישן מדי
+        function dateProblem(s) {
+            if (!isValidIsoDate(s)) return 'invalid';
+            const now = new Date();
+            const today = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+            const tomorrow = new Date(new Date(today + 'T00:00:00Z').getTime() + 86400000).toISOString().slice(0, 10);
+            if (s > tomorrow) return 'future';
+            const yearAgo = new Date(new Date(today + 'T00:00:00Z').getTime() - 365 * 86400000).toISOString().slice(0, 10);
+            if (s < yearAgo) return 'old';
+            const monthEl = document.getElementById('invoiceMonthSelect');
+            if (monthEl && monthEl.value && s.slice(0, 7) !== monthEl.value) return 'outside';
+            return '';
+        }
+
+        // הצעות תיקון: מחליף 4<->6 בספרות התאריך ומחזיר רק תאריכים סבירים (בחודש הנבחר)
+        function digitSwapSuggestions(s) {
+            if (!isValidIsoDate(s)) return [];
+            const pos = [];
+            for (let i = 0; i < s.length; i++) if (s[i] === '4' || s[i] === '6') pos.push(i);
+            if (!pos.length || pos.length > 6) return [];
+            const out = [];
+            for (let mask = 1; mask < (1 << pos.length); mask++) {
+                const arr = s.split('');
+                let n = 0;
+                pos.forEach((p, k) => { if (mask & (1 << k)) { arr[p] = arr[p] === '4' ? '6' : '4'; n++; } });
+                const cand = arr.join('');
+                if (isValidIsoDate(cand) && dateProblem(cand) === '') out.push({ cand, n });
+            }
+            return out.sort((a, b) => a.n - b.n).slice(0, 3).map(o => o.cand);
+        }
+
+        // משווה קריאת עמוד מלא מול קריאת כותרת מוגדלת. כשיש אי-התאמה - מסמן ומציע את שתי האפשרויות
+        function reconcileHeader(parsed, hdr) {
+            const meta = { dateConflict: false, dateAlt: '', numberConflict: false, numberAlt: '', typeConflict: false };
+            if (!hdr) return meta;
+            const dA = isValidIsoDate(parsed.invoiceDate) ? parsed.invoiceDate : '';
+            const dB = isValidIsoDate(hdr.invoiceDate) ? hdr.invoiceDate : '';
+            if (dA && dB && dA !== dB) { meta.dateConflict = true; meta.dateAlt = dA; parsed.invoiceDate = dB; }
+            else if (!dA && dB) parsed.invoiceDate = dB;
+            const nA = String(parsed.invoiceNumber || '').trim();
+            const nB = String(hdr.invoiceNumber || '').trim();
+            if (nA && nB && nA !== nB) { meta.numberConflict = true; meta.numberAlt = nA; parsed.invoiceNumber = nB; }
+            else if (!nA && nB) parsed.invoiceNumber = nB;
+            if (!parsed.taxId && hdr.taxId) parsed.taxId = hdr.taxId;
+            if (!parsed.supplier && hdr.supplier) parsed.supplier = hdr.supplier;
+            return meta;
+        }
+
+        function hintChip(label, onclickCode) {
+            return `<button type="button" onclick="${onclickCode}" style="width:auto; margin:2px 4px 2px 0; padding:2px 8px; font-size:0.95em; background:#fff; color:#b9770e; border:1px solid #e67e22; border-radius:12px; cursor:pointer;">${label}</button>`;
+        }
+
+        window.applyDateSuggestion = function(iso) {
+            const el = document.getElementById('invoiceDateInput');
+            if (el && isValidIsoDate(iso)) { el.value = iso; refreshDateHint(); }
+        };
+        window.applyNumberSuggestion = function(num) {
+            const el = document.getElementById('invoiceNumberInput');
+            if (el) { el.value = num; refreshNumberHint(); }
+        };
+
+        window.refreshDateHint = function() {
+            const el = document.getElementById('dateHint');
+            const input = document.getElementById('invoiceDateInput');
+            if (!el || !input) return;
+            if (editingInvoiceId || !input.value) { el.innerHTML = ''; return; }
+            const v = input.value;
+            const msgs = [];
+            const sugg = [];
+            const meta = currentScanMeta || {};
+            if (meta.dateConflict && meta.dateAlt && meta.dateAlt !== v) {
+                msgs.push('שתי קריאות של המסמך נתנו תאריכים שונים - בדוק מול התמונה.');
+                sugg.push(meta.dateAlt);
+            }
+            const prob = dateProblem(v);
+            const probText = { future: 'התאריך עתידי', old: 'התאריך ישן מעל שנה', outside: 'התאריך מחוץ לחודש שנבחר' }[prob];
+            if (probText) {
+                msgs.push(probText + ' - ייתכן בלבול בין 4 ל-6.');
+                digitSwapSuggestions(v).forEach(c => { if (!sugg.includes(c)) sugg.push(c); });
+            }
+            if (!msgs.length) { el.innerHTML = ''; return; }
+            el.innerHTML = `<div style="color:#b9770e;">⚠️ ${msgs.join(' ')}</div>` +
+                (sugg.length ? `<div>אולי: ${sugg.map(c => hintChip(fmtIsoDate(c), `applyDateSuggestion('${c}')`)).join('')}</div>` : '');
+        };
+
+        window.refreshNumberHint = function() {
+            const el = document.getElementById('numberHint');
+            const input = document.getElementById('invoiceNumberInput');
+            if (!el || !input) return;
+            const meta = currentScanMeta || {};
+            if (editingInvoiceId || !meta.numberConflict || !meta.numberAlt || meta.numberAlt === input.value.trim()) { el.innerHTML = ''; return; }
+            const safe = esc(meta.numberAlt);
+            el.innerHTML = `<div style="color:#b9770e;">⚠️ שתי קריאות נתנו מספר שונה - בדוק מול התמונה.</div><div>אולי: ${hintChip(safe, `applyNumberSuggestion(this.textContent)`)}</div>`;
+        };
+
+        // פונקציה משותפת: מקבלת base64 (בלי הפריפיקס data:) ושולחת לזיהוי AI דרך ה-Cloud Function,
+        // בין אם התמונה הגיעה מהעלאת קובץ ובין אם מצילום ישיר דרך מצלמת המכשיר
+        // קריאת זיהוי אחת ל-Cloud Function עבור עמוד בודד
+        async function recognizeOnePage(base64Data, opts = {}) {
+            // עד 3 ניסיונות: רשת נופלת / שגיאת שרת זמנית לא אמורות להפיל את הסריקה
+            let lastErr;
+            for (let attempt = 0; attempt < 3; attempt++) {
+                try { return await recognizeOnePageOnce(base64Data, opts); }
+                catch (err) {
+                    lastErr = err;
+                    if (!err.retryable) break;
+                    await new Promise(r => setTimeout(r, 1200 * (attempt + 1)));
+                }
+            }
+            throw lastErr;
+        }
+
+        async function recognizeOnePageOnce(base64Data, opts = {}) {
+            let response;
+            try {
+            response = await fetch(RECOGNIZE_FUNCTION_URL, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    image: base64Data,
+                    mediaType: 'image/jpeg',
+                    suppliers: suppliersList,
+                    detectDocType: true,
+                    detectHandwriting: !opts.headerOnly,
+                    headerOnly: Boolean(opts.headerOnly),
+                    extraInstructions: EXTRA_OCR_INSTRUCTIONS
+                })
+            });
+            } catch (netErr) {
+                const e = new Error('אין חיבור לשרת הזיהוי - בדוק אינטרנט.'); e.retryable = true; throw e;
+            }
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok || data.error) {
+                const e = new Error(data.error || `שגיאת שרת (${response.status})`);
+                e.retryable = response.status >= 500 || response.status === 429;
+                throw e;
+            }
+            const parsed = data.result;
+            if (!parsed || typeof parsed !== 'object') {
+                throw new Error("התשובה מהשרת לא תקינה");
+            }
+            return parsed;
+        }
+
+        // מאחד תוצאות זיהוי של כמה עמודים לתוצאה אחת:
+        // פרטי הכותרת נלקחים מהעמוד הראשון שבו הם זוהו, הפריטים מצטברים מכל העמודים,
+        // והסכום הכולל נלקח מהעמוד האחרון שבו זוהה סכום (בדרך כלל שם נמצא הסה"כ).
+        function mergePageResults(results) {
+            const merged = { items: [] };
+            results.forEach(r => {
+                if (!r) return;
+                ['supplier', 'invoiceNumber', 'invoiceDate', 'paymentMethod', 'docType', 'taxId'].forEach(k => {
+                    if (!merged[k] && r[k]) merged[k] = r[k];
+                });
+                if (Array.isArray(r.items)) merged.items.push(...r.items);
+                if (r.isCredit) merged.isCredit = true;
+                if (Array.isArray(r.handwrittenNotes)) merged.handwrittenNotes = (merged.handwrittenNotes || []).concat(r.handwrittenNotes);
+                if (typeof r.amount === 'number') merged.amount = r.amount;
+            });
+            return merged;
+        }
+
+        // תמונת תצוגה מקדימה: עמוד אחד כמו שהוא, או כל העמודים מודבקים אנכית
+        async function buildScanPreview(pages) {
+            if (pages.length === 1) return `data:image/jpeg;base64,${pages[0]}`;
+            const imgs = await Promise.all(pages.map(b64 => new Promise((resolve, reject) => {
+                const im = new Image();
+                im.onload = () => resolve(im);
+                im.onerror = reject;
+                im.src = `data:image/jpeg;base64,${b64}`;
+            })));
+            const W = pages.length > 3 ? 600 : 800;   // הרבה עמודים = תמונת תצוגה קטנה יותר (חוסך אחסון ורשת)
+            const GAP = 6;
+            const heights = imgs.map(im => Math.round(im.height * W / im.width));
+            const canvas = document.createElement('canvas');
+            canvas.width = W;
+            canvas.height = heights.reduce((a, b) => a + b, 0) + GAP * (imgs.length - 1);
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#ccc';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            let y = 0;
+            imgs.forEach((im, i) => {
+                ctx.drawImage(im, 0, y, W, heights[i]);
+                y += heights[i] + GAP;
+            });
+            return canvas.toDataURL('image/jpeg', 0.7);
+        }
+
+        // פונקציה משותפת: מקבלת רשימת עמודים (base64 בלי הפריפיקס data:) ושולחת כל עמוד לזיהוי AI
+        // דרך ה-Cloud Function, ואז מאחדת. משמשת גם חשבוניות וגם תעודות משלוח (לפי scanMode).
+        async function processScanPages(pages) {
+            if (!RECOGNIZE_FUNCTION_URL || RECOGNIZE_FUNCTION_URL.includes('REGION-PROJECT')) {
+                alert("זיהוי חכם עדיין לא מחובר: יש לפרוס את ה-Cloud Function ולעדכן את RECOGNIZE_FUNCTION_URL בקוד.");
+                return;
+            }
+            if (!pages || pages.length === 0) return;
+
+            const recognizingEl = document.getElementById('invoiceRecognizing');
+            const confirmForm = document.getElementById('invoiceConfirmForm');
+            if (!recognizingEl.dataset.baseText) recognizingEl.dataset.baseText = recognizingEl.innerText;
+            confirmForm.classList.add('hidden');
+            recognizingEl.classList.remove('hidden');
+            setRecognitionControlsDisabled(true);
+            let retryScan = false;
+
+            try {
+                currentScanPages = []; currentScanResults = [];
+                recognizedPageCount = pages.length;
+                recognizedImageBase64 = await buildScanPreview(pages);
+
+                const results = [];
+                for (let i = 0; i < pages.length; i++) {
+                    if (pages.length > 1) recognizingEl.innerText = `⏳ מעבד עמוד ${i + 1} מתוך ${pages.length}...`;
+                    try {
+                        results.push(await recognizeOnePage(pages[i]));
+                    } catch (err) {
+                        throw (pages.length > 1) ? new Error(`עמוד ${i + 1}: ${err.message}`) : err;
+                    }
+                }
+
+                const parsed = (pages.length === 1) ? results[0] : mergePageResults(results);
+                if (parsed.isCredit && parsed.amount > 0) {
+                    parsed.amount = -Math.abs(parsed.amount);
+                }
+
+                // קריאה שנייה של כותרת העמוד הראשון (מוגדלת) - לאימות סוג מסמך, מספר ותאריך
+                let hdrParsed = null;
+                try {
+                    recognizingEl.innerText = '⏳ בודק שוב תאריך ומספר מסמך...';
+                    hdrParsed = await recognizeOnePage(await cropPageHeader(pages[0]), { headerOnly: true });
+                } catch (e) { console.warn('קריאת כותרת שנייה נכשלה:', e); }
+
+                const meta = reconcileHeader(parsed, hdrParsed);
+                meta.handwritingField = Array.isArray(parsed.handwrittenNotes);
+                let det = detectDocType(parsed);
+                if (hdrParsed) {
+                    const dh = detectDocType(hdrParsed);
+                    if (dh.type !== det.type) {
+                        // כותרת המסמך היא האינדיקציה החזקה - אם היא חד-משמעית, היא קובעת; בכל מקרה מבקשים בדיקה
+                        det = { type: dh.sure ? dh.type : det.type, sure: false, conflict: true };
+                        meta.typeConflict = true;
+                    }
+                }
+                const rawFull = String(parsed.docType || parsed.documentType || '').trim();
+                const rawHdr = hdrParsed ? String(hdrParsed.docType || hdrParsed.documentType || '').trim() : '';
+                meta.docTypeNote = (!rawFull && !rawHdr)
+                    ? 'השרת לא החזיר סוג מסמך - הסוג נוחש לפי פריטים ואמצעי תשלום בלבד.'
+                    : `השרת החזיר: ${rawFull || '—'} (עמוד מלא) / ${rawHdr || '—'} (כותרת)${(hdrParsed && hdrParsed.docTitle) || parsed.docTitle ? ' | כותרת מודפסת: "' + ((hdrParsed && hdrParsed.docTitle) || parsed.docTitle) + '"' : ''}.`;
+                currentScanMeta = meta;
+                currentScanPages = pages.slice();
+                currentScanResults = results.slice();
+                lastAutoAmount = (typeof parsed.amount === 'number') ? parsed.amount : null;
+                scanMode = det.type;
+                autoDetectedDocType = det;
+                openInvoiceConfirmForm(parsed, null, itemsMismatchTotal(parsed));
+            } catch (err) {
+                retryScan = await appConfirm("הזיהוי נכשל: " + err.message + "\nלנסות שוב?", { ok: '🔄 נסה שוב', cancel: 'מילוי ידני' });
+                if (!retryScan) openInvoiceConfirmForm(null, null);
+            } finally {
+                recognizingEl.innerText = recognizingEl.dataset.baseText;
+                recognizingEl.classList.add('hidden');
+                setRecognitionControlsDisabled(false);
+            }
+            if (retryScan) return processScanPages(pages);
+        }
+
+        function openInvoiceConfirmForm(recognized, existingInvoice = null, itemsMismatch = false) {
+            const confirmForm = document.getElementById('invoiceConfirmForm');
+            const imgWrap = document.getElementById('invoicePreviewImgWrap');
+            const formTitle = document.getElementById('confirmFormTitle');
+            const saveBtn = document.getElementById('saveInvoiceBtn');
+            const itemsDisplay = document.getElementById('invoiceItemsDisplay');
+            const duplicateBox = document.getElementById('duplicateWarningBox');
+            const mismatchBox = document.getElementById('mismatchWarningBox');
+            if (mismatchBox) mismatchBox.classList.toggle('hidden', !itemsMismatch);
+
+            const isDeliveryMode = (scanMode === 'delivery');
+            const typeGroupEl = document.getElementById('docTypeGroup');
+            if (typeGroupEl) typeGroupEl.classList.remove('hidden');   // גם בעריכת מסמך קיים - אפשר להמיר בין חשבונית לתעודה
+            const typeHintEl = document.getElementById('docTypeHint');
+            if (typeHintEl) {
+                typeHintEl.innerText = (!existingInvoice && autoDetectedDocType)
+                    ? (autoDetectedDocType.conflict ? '⚠️ שתי קריאות נתנו סוג שונה - בדוק לפי הכותרת במסמך (חשבונית / תעודת משלוח).'
+                        : (autoDetectedDocType.sure ? 'זוהה אוטומטית - אפשר לשנות אם טעה.' : 'לא בטוח בזיהוי - בדוק שהסוג נכון.'))
+                    : (existingInvoice ? 'אפשר להמיר בין חשבונית לתעודת משלוח - בשמירה המסמך יעבור לרשימה המתאימה.' : '');
+                if (!existingInvoice && currentScanMeta && currentScanMeta.docTypeNote) typeHintEl.innerText += ' ' + currentScanMeta.docTypeNote;
+                typeHintEl.style.color = (!existingInvoice && autoDetectedDocType && (autoDetectedDocType.conflict || !autoDetectedDocType.sure)) ? '#b9770e' : '#16a085';
+            }
+            applyDocTypeUI();
+
+            renderSupplierSelect();
+            const supplierSel = document.getElementById('invoiceSupplierSelect');
+            const numberInput = document.getElementById('invoiceNumberInput');
+            const dateInput = document.getElementById('invoiceDateInput');
+            const amountInput = document.getElementById('invoiceAmountInput');
+            const paymentInput = document.getElementById('invoicePaymentMethodInput');
+            const notesInput = document.getElementById('invoiceNotesInput');
+
+            duplicateBox.classList.add('hidden');
+
+            if (existingInvoice) {
+                editingInvoiceId = existingInvoice.id;
+                editingOriginalKind = isDeliveryMode ? 'delivery' : 'invoice';
+                if (formTitle) formTitle.innerText = isDeliveryMode ? "עריכת תעודת משלוח קיימת" : "עריכת חשבונית קיימת";
+                if (saveBtn) saveBtn.innerText = isDeliveryMode ? "עדכן תעודה" : "עדכן חשבונית";
+                imgWrap.innerHTML = existingInvoice.imageUrl
+                    ? ((existingInvoice.pageCount || 1) > 1
+                        ? `<div style="max-height:280px; overflow-y:auto; border:1px solid #ddd; border-radius:8px;"><a href="#" onclick="openImageViewer('${esc(existingInvoice.imageUrl)}'); return false;"><img src="${esc(existingInvoice.imageUrl)}" style="width:100%; display:block;"></a></div><div style="font-size:0.75em; color:#555; margin-top:2px;">${esc(existingInvoice.pageCount)} עמודים - גלול לצפייה</div>`
+                        : `<a href="#" onclick="openImageViewer('${esc(existingInvoice.imageUrl)}'); return false;"><img src="${esc(existingInvoice.imageUrl)}" style="max-width:100%; max-height:220px; border-radius:8px; border:1px solid #ddd;"></a>`)
+                    : '';
+
+                const hintElEdit = document.getElementById('supplierMatchHint');
+                if (hintElEdit) hintElEdit.innerText = '';
+                lastRecognizedSupplierRaw = ''; lastRecognizedTaxId = '';
+                if (suppliersList.includes(existingInvoice.supplier)) {
+                    supplierSel.value = existingInvoice.supplier;
+                } else {
+                    supplierSel.value = '__other__';
+                }
+                numberInput.value = existingInvoice.invoiceNumber || '';
+                if (dateInput) dateInput.value = existingInvoice.invoiceDate || '';
+                amountInput.value = existingInvoice.amount ?? '';
+                paymentInput.value = existingInvoice.paymentMethod ?? '';
+                notesInput.value = (existingInvoice.notes === 'חשבונית זיכוי') ? '' : (existingInvoice.notes ?? '');
+                recognizedItemsList = existingInvoice.items || [];
+                handwrittenNotesList = normalizeHandwrittenNotes(existingInvoice.handwrittenNotes);
+            } else {
+                editingInvoiceId = null;
+                if (formTitle) formTitle.innerText = isDeliveryMode ? "אישור ואימות תעודת משלוח" : "אישור ואימות חשבונית";
+                if (saveBtn) saveBtn.innerText = isDeliveryMode ? "שמור תעודה" : "שמור חשבונית";
+
+                imgWrap.innerHTML = recognizedImageBase64
+                    ? (recognizedPageCount > 1
+                        ? `<div style="max-height:280px; overflow-y:auto; border:1px solid #ddd; border-radius:8px;"><img src="${recognizedImageBase64}" style="width:100%; display:block;"></div><div style="font-size:0.75em; color:#555; margin-top:2px;">${recognizedPageCount} עמודים - גלול לצפייה</div>`
+                        : `<img src="${recognizedImageBase64}" style="max-width:100%; max-height:220px; border-radius:8px; border:1px solid #ddd;">`)
+                    : '';
+
+                lastRecognizedSupplierRaw = (recognized && recognized.supplier) ? String(recognized.supplier) : '';
+                lastRecognizedTaxId = (recognized && (recognized.taxId || recognized.businessId)) ? String(recognized.taxId || recognized.businessId) : '';
+                const matchedSupplier = matchSupplier(lastRecognizedSupplierRaw, lastRecognizedTaxId);
+                const hintEl = document.getElementById('supplierMatchHint');
+                if (matchedSupplier) {
+                    supplierSel.value = matchedSupplier;
+                    recognized.supplier = matchedSupplier;
+                    if (hintEl) { hintEl.style.color = '#16a085'; hintEl.innerText = '✓ הספק זוהה אוטומטית'; }
+                } else {
+                    supplierSel.value = '';
+                    if (hintEl) {
+                        hintEl.style.color = '#c0392b';
+                        hintEl.innerText = lastRecognizedSupplierRaw
+                            ? `לא זוהה ספק ברשימה (נקרא: "${lastRecognizedSupplierRaw}"). בחר ספק - המערכת תזכור לפעם הבאה.`
+                            : 'לא זוהה ספק. בחר ספק ידנית.';
+                    }
+                }
+                notesInput.value = '';
+
+                numberInput.value = (recognized && recognized.invoiceNumber) ? recognized.invoiceNumber : '';
+                // תאריך שזוהה ע"י ה-AI (YYYY-MM-DD) - מקבלים רק תאריך תקין, אחרת משאירים ריק
+                if (dateInput) {
+                    const d = recognized && recognized.invoiceDate;
+                    dateInput.value = (typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d) && !isNaN(new Date(d).getTime())) ? d : '';
+                }
+                amountInput.value = (recognized && typeof recognized.amount === 'number') ? recognized.amount : '';
+                paymentInput.value = (recognized && recognized.paymentMethod) ? recognized.paymentMethod : '';
+                recognizedItemsList = (recognized && Array.isArray(recognized.items)) ? recognized.items : [];
+                handwrittenNotesList = normalizeHandwrittenNotes(recognized && recognized.handwrittenNotes);
+
+                if (recognized) {
+                    const dupList = isDeliveryMode ? monthlyNotes : monthlyInvoices;
+                    const isDuplicate = dupList.some(inv => {
+                        const sameSupplier = inv.supplier === recognized.supplier;
+                        const sameAmount = Math.abs((Number(inv.amount) || 0) - (Number(recognized.amount) || 0)) < 0.01;
+                        const sameNum = recognized.invoiceNumber && inv.invoiceNumber && (String(inv.invoiceNumber).trim() === String(recognized.invoiceNumber).trim());
+                        // בתעודות משלוח סכום זהה לבדו לא מעיד על כפילות (הזמנות חוזרות שכיחות) - נדרש מספר זהה, או סכום+תאריך
+                        if (isDeliveryMode) return sameSupplier && (sameNum || (sameAmount && inv.invoiceDate && inv.invoiceDate === recognized.invoiceDate));
+                        // אותו סכום אבל גם מספר וגם תאריך שונים (ושניהם קיימים) = חשבונית נפרדת, לא כפילות
+                        const diffNumAndDate = !sameNum && recognized.invoiceNumber && inv.invoiceNumber && recognized.invoiceDate && inv.invoiceDate && inv.invoiceDate !== recognized.invoiceDate;
+                        return sameSupplier && (sameNum || (sameAmount && !diffNumAndDate));
+                    });
+
+                    if (isDuplicate) {
+                        duplicateBox.classList.remove('hidden');
+                        alert(`⚠️ אזהרה: נראית ${isDeliveryMode ? 'תעודה' : 'חשבונית'} זו כבר קיימת במאגר!\n(ספק: ${recognized.supplier}, סכום: ${recognized.amount} ₪${recognized.invoiceNumber ? ', מס\' חשבונית: ' + recognized.invoiceNumber : ''})`);
+                    }
+                }
+            }
+
+            if (recognizedItemsList.length > 0) {
+                itemsDisplay.innerHTML = recognizedItemsList.map(it =>
+                    `• <b>${esc(it.name)}</b> - כמות: ${esc(it.quantity || 1)}${it.price ? ' (' + it.price + ' ₪)' : ''}`
+                ).join('<br>');
+            } else {
+                itemsDisplay.innerText = "לא זוהו פרטים בשרת.";
+            }
+
+            renderHandwrittenBox();
+            refreshDateHint();
+            refreshNumberHint();
+            const addRow = document.getElementById('addPagesRow');
+            if (addRow) addRow.classList.toggle('hidden', Boolean(existingInvoice) || !recognizedImageBase64 || currentScanPages.length === 0);
+            const hwStatus = document.getElementById('handwritingStatus');
+            if (hwStatus) {
+                const m = currentScanMeta;
+                if (existingInvoice || !m) hwStatus.innerHTML = '';
+                else if (!m.handwritingField) hwStatus.innerHTML = '<span style="color:#b9770e;">⚠️ השרת לא החזיר שדה כתב יד - יש לפרוס מחדש את הפונקציה recognizeInvoice המעודכנת.</span>';
+                else if (!handwrittenNotesList.length) hwStatus.innerHTML = '<span style="color:#999;">לא זוהה כתב יד במסמך.</span>';
+                else hwStatus.innerHTML = '';
+            }
+            refreshPriceAlerts(!existingInvoice);
+            confirmForm.classList.remove('hidden');
+            confirmForm.scrollIntoView({ behavior: 'smooth' });
+        }
+
+        window.editInvoiceEntry = function(invoiceId) {
+            const inv = monthlyInvoices.find(i => i.id === invoiceId);
+            if (!inv) return;
+            scanMode = 'invoice';
+            recognizedImageBase64 = null;
+            currentScanMeta = null;
+            openInvoiceConfirmForm(null, inv);
+        };
+
+        window.cancelInvoiceEntry = function() {
+            document.getElementById('invoiceConfirmForm').classList.add('hidden');
+            recognizedImageBase64 = null;
+            recognizedItemsList = [];
+            editingInvoiceId = null;
+            scanMode = 'invoice';
+            autoDetectedDocType = null;
+            currentScanMeta = null;
+            handwrittenNotesList = [];
+            renderHandwrittenBox();
+        };
+
+        function makeInvoiceId() {
+            if (window.crypto && typeof window.crypto.randomUUID === 'function') return window.crypto.randomUUID();
+            return `${Date.now()}_${Math.floor(Math.random()*1000000)}`;
+        }
+
+        window.saveInvoiceEntry = async function() {
+            if (scanMode === 'delivery') return saveDeliveryNoteEntry();
+            const saveBtn = document.getElementById('saveInvoiceBtn');
+            const supplierSel = document.getElementById('invoiceSupplierSelect');
+            let supplier = supplierSel.value;
+            if (!supplier) { alert("אנא בחר ספק."); return; }
+            if (supplier === '__other__') {
+                const custom = await appPrompt("הקלד את שם הספק:");
+                if (!custom || !custom.trim()) { alert("אנא הכנס שם ספק."); return; }
+                supplier = custom.trim();
+                if (!suppliersList.includes(supplier)) {
+                    suppliersList.push(supplier);
+                    try { await ackOrQueue(setDoc(getSettingsDoc("suppliers_list"), { suppliers: suppliersList }), 8000, "רשימת ספקים"); } catch(e){}
+                }
+            }
+            await learnSupplierAlias(supplier);
+
+            const invoiceNumber = document.getElementById('invoiceNumberInput').value.trim();
+            const amount = parseFloat(document.getElementById('invoiceAmountInput').value);
+            if (isNaN(amount) || amount === 0) { alert("אנא הכנס סכום תקין (אפשר סכום שלילי לזיכוי, אך לא 0)."); return; }
+            const paymentMethod = document.getElementById('invoicePaymentMethodInput').value.trim();
+            let notes = document.getElementById('invoiceNotesInput').value.trim();
+            if (notes === 'חשבונית זיכוי') notes = '';
+            const invoiceDate = (document.getElementById('invoiceDateInput').value || '').trim();
+            const selectedMonth = getSelectedInvoiceMonth();
+            // אם הוזן תאריך - החשבונית משויכת לחודש של התאריך, ולא בהכרח לחודש שנבחר בתצוגה
+            const monthKey = invoiceDate ? invoiceDate.slice(0, 7) : selectedMonth;
+            const isUpdate = Boolean(editingInvoiceId);
+
+            if (invoiceDate && monthKey !== selectedMonth) {
+                const [dy, dm, dd] = invoiceDate.split('-');
+                const [my, mm] = monthKey.split('-');
+                if (!await appConfirm(`תאריך החשבונית הוא ${dd}/${dm}/${dy}, ולכן היא תישמר בחודש ${mm}/${my} (ולא בחודש שמוצג עכשיו).\nלהמשיך?`)) {
+                    return;
+                }
+            }
+
+            // בדיקת כפילות אמיתית לפני שמירה בפועל - לא רק אזהרה חזותית, אלא חסימה שדורשת אישור מפורש
+            if (!isUpdate) {
+                // בדיקת הכפילות מתבצעת מול החודש שאליו החשבונית תישמר בפועל
+                let compareList = monthlyInvoices;
+                if (monthKey !== selectedMonth) {
+                    try {
+                        const snapCmp = await getDocs(query(getInvoicesCollection(), where("monthKey", "==", monthKey)));
+                        compareList = snapCmp.docs.map(d => d.data()).filter(x => x.docType !== 'delivery_note');
+                    } catch (e) { compareList = []; }
+                }
+                const isDuplicate = compareList.some(inv => {
+                    const sameSupplier = inv.supplier === supplier;
+                    const sameAmount = Math.abs((Number(inv.amount) || 0) - amount) < 0.01;
+                    const sameNum = invoiceNumber && inv.invoiceNumber && (String(inv.invoiceNumber).trim() === invoiceNumber);
+                    // אותו סכום אבל גם מספר וגם תאריך שונים (ושניהם קיימים) = חשבונית נפרדת, לא כפילות
+                    const diffNumAndDate = !sameNum && invoiceNumber && inv.invoiceNumber && invoiceDate && inv.invoiceDate && inv.invoiceDate !== invoiceDate;
+                    return sameSupplier && (sameNum || (sameAmount && !diffNumAndDate));
+                });
+                if (isDuplicate && !await appConfirm(`⚠️ חשבונית דומה (ספק: ${supplier}, סכום: ${amount} ₪) כבר קיימת במערכת.\nלשמור בכל זאת?`)) {
+                    return;
+                }
+            }
+
+            if (saveBtn) { saveBtn.disabled = true; saveBtn.innerText = "שומר..."; }
+
+            try {
+                const invoiceId = editingInvoiceId || makeInvoiceId();
+                const invData = {
+                    id: invoiceId, docType: 'invoice', supplier, invoiceNumber, invoiceDate, amount, paymentMethod, notes, monthKey,
+                    items: recognizedItemsList, handwrittenNotes: keptHandwrittenNotes()
+                };
+                if (!isUpdate) {
+                    invData.createdAt = Date.now();
+                    if (recognizedImageBase64) invData.pageCount = recognizedPageCount;
+                    // התראות עליית מחיר נשמרות על החשבונית עצמה, לצורך כרטיס "שינויי מחיר החודש"
+                    if (amount > 0) {
+                        try { invData.priceAlerts = (await computePriceChanges(supplier, recognizedItemsList, invoiceDate)).ups; } catch (e) { /* לא קריטי */ }
+                    }
+                } else {
+                    invData.updatedAt = Date.now();
+                }
+
+                // שמירת התמונה המקורית ל-Firebase Storage מתבצעת ברקע (לא חוסמת) - כך שהמשתמש
+                // לא צריך לחכות להעלאת התמונה כדי לראות שהחשבונית נשמרה. אם ההעלאה נכשלת/איטית,
+                // החשבונית עצמה כבר נשמרה בהצלחה והתמונה פשוט לא תצורף אליה.
+                if (recognizedImageBase64) {
+                    const imgToUpload = recognizedImageBase64;
+                    (async () => {
+                        try {
+                            const imgRef = storageRef(storage, `${RESTAURANT_ID}/invoices/${invoiceId}.jpg`);
+                            await withTimeout(uploadString(imgRef, imgToUpload, 'data_url'), 30000, "העלאת תמונה");
+                            const imageUrl = await withTimeout(getDownloadURL(imgRef), 15000, "קבלת קישור לתמונה");
+                            await setDoc(doc(getInvoicesCollection(), invoiceId), { imageUrl }, { merge: true });
+                            if (getSelectedInvoiceMonth() === monthKey) loadInvoicesForMonth();
+                        } catch (imgErr) {
+                            console.warn("שמירת תמונת החשבונית נכשלה/נמשכה זמן רב מדי, החשבונית נשמרה בלי תמונה:", imgErr);
+                        }
+                    })();
+                }
+
+                await ackOrQueue(
+                    setDoc(doc(getInvoicesCollection(), invoiceId), invData, { merge: true }),
+                    20000,
+                    "שמירת החשבונית"
+                );
+                if (!isUpdate && amount > 0) {
+                    try { await updatePriceBook(supplier, recognizedItemsList, invoiceDate, 'invoice'); } catch (e) { console.warn("עדכון מחירון נכשל:", e); }
+                }
+                document.getElementById('invoiceConfirmForm').classList.add('hidden');
+                recognizedImageBase64 = null;
+                recognizedItemsList = [];
+                handwrittenNotesList = [];
+                editingInvoiceId = null;
+                alert(isUpdate ? (editingOriginalKind === 'delivery' ? "התעודה הומרה לחשבונית בהצלחה!" : "החשבונית עודכנה בהצלחה!") : "החשבונית נשמרה בהצלחה!");
+                if (monthKey !== selectedMonth) {
+                    const monthEl = document.getElementById('invoiceMonthSelect');
+                    if (monthEl) monthEl.value = monthKey;
+                    customReportEdits = {};
+                }
+                loadInvoicesForMonth();
+            } catch(e) {
+                alert("שגיאה בשמירת החשבונית: " + (e && e.message ? e.message : "שגיאה לא ידועה") + "\nניתן לנסות שוב.");
+            } finally {
+                if (saveBtn) { saveBtn.disabled = false; saveBtn.innerText = isUpdate ? "עדכן חשבונית" : "שמור חשבונית"; }
+            }
+        };
+
+        window.deleteInvoiceEntry = async function(invoiceId) {
+            if (!await appConfirm("למחוק את החשבונית הזו?")) return;
+            try {
+                const inv = monthlyInvoices.find(i => i.id === invoiceId);
+                await ackOrQueue(deleteDoc(doc(getInvoicesCollection(), invoiceId)), 15000, "מחיקה");
+                if (inv && inv.imageUrl) {
+                    for (const path of [`${invoiceId}.jpg`, `dn_${invoiceId}.jpg`]) { try { await deleteObject(storageRef(storage, `${RESTAURANT_ID}/invoices/${path}`)); } catch(e) { /* לא קריטי אם התמונה כבר לא קיימת */ } }
+                }
+                loadInvoicesForMonth();
+            } catch(e) { alert("שגיאה במחיקת החשבונית."); }
+        };
+
+        function getReportEditsDoc(monthKey) { return getSettingsDoc(`report_edits_${monthKey}`); }
+
+        // שומר את עריכות הדוח הידניות ב-Firestore כדי שלא יאבדו ברענון דף (best-effort, לא חוסם את הממשק)
+        async function persistReportEdits(monthKey) {
+            try {
+                await setDoc(getReportEditsDoc(monthKey), { edits: customReportEdits });
+            } catch (e) { console.warn("שמירת עריכות הדוח נכשלה:", e); }
+        }
+
+        window.loadInvoicesForMonth = async function() {
+            const monthKey = getSelectedInvoiceMonth();
+            const tbody = document.getElementById('invoicesTableBody');
+            tbody.innerHTML = '<tr><td colspan="7" style="color:#888;">טוען נתונים...</td></tr>';
+
+            try {
+                const q = query(getInvoicesCollection(), where("monthKey", "==", monthKey));
+                const snap = await getDocs(q);
+                monthlyInvoices = [];
+                monthlyNotes = [];
+                snap.forEach(d => {
+                    let data = d.data();
+                    if (data.notes === 'חשבונית זיכוי') data.notes = ''; 
+                    if (data.docType === 'delivery_note') monthlyNotes.push(data); else monthlyInvoices.push(data);
+                });
+                monthlyInvoices.sort((a, b) => (a.supplier || '').localeCompare(b.supplier || '', 'he'));
+
+                try {
+                    const editsSnap = await getDoc(getReportEditsDoc(monthKey));
+                    customReportEdits = (editsSnap.exists() && editsSnap.data().edits) ? editsSnap.data().edits : {};
+                } catch (e) { /* אם הטעינה נכשלת, ממשיכים עם עריכות ריקות */ }
+
+                populateSupplierSummaryOptions();
+                renderEditableReportTable();
+                renderPriceAlertsCard();
+                renderDeliveryNotes();
+
+                if (monthlyInvoices.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="7" style="color:#888;">אין חשבוניות רשומות לחודש זה.</td></tr>';
+                    return;
+                }
+
+                tbody.innerHTML = monthlyInvoices.map(inv => {
+                    const amt = Number(inv.amount) || 0;
+                    const isCredit = amt < 0;
+                    const itemsCount = Array.isArray(inv.items) ? inv.items.length : 0;
+                    const itemsTooltip = itemsCount > 0 ? `${itemsCount} פריטים` : '-';
+                    
+                    return `
+                        <tr class="${isCredit ? 'credit-row' : ''}">
+                            <td>${esc(inv.supplier)}</td>
+                            <td>${esc(inv.invoiceNumber || '-')}${inv.invoiceDate ? `<br><span style="font-size:0.8em; color:#777;">${esc(inv.invoiceDate.split('-').reverse().join('/'))}</span>` : ''}</td>
+                            <td class="${isCredit ? 'credit-badge' : ''}">${amt.toFixed(2)} ₪ ${isCredit ? '(זיכוי)' : ''}</td>
+                            <td>${esc(inv.paymentMethod || '-')}</td>
+                            <td>${esc(itemsTooltip)}${handwrittenBadgeHtml(inv)}</td>
+                            <td>${esc(inv.notes || '-')}</td>
+                            <td style="white-space:nowrap;">
+                                ${inv.imageUrl ? `<button class="view-img-btn" data-url="${esc(inv.imageUrl)}" onclick="openImageViewer(this.dataset.url)">📷 תמונה</button>` : ''}
+                                <button class="edit-btn" data-id="${esc(inv.id)}" onclick="editInvoiceEntry(this.dataset.id)">ערוך</button>
+                                <button class="delete-btn" data-id="${esc(inv.id)}" onclick="deleteInvoiceEntry(this.dataset.id)">מחק</button>
+                            </td>
+                        </tr>`;
+                }).join('');
+            } catch(e) {
+                tbody.innerHTML = '<tr><td colspan="7" style="color:red;">שגיאה בטעינת החשבוניות.</td></tr>';
+            }
+        };
+
+        function renderEditableReportTable() {
+            const reportTbody = document.getElementById('editableReportTableBody');
+            const totalCell = document.getElementById('editableReportTotalCell');
+            if (!reportTbody) return;
+
+            const { rows, total } = getFinalReportData();
+
+            if (rows.length === 0) {
+                reportTbody.innerHTML = '<tr><td colspan="4" style="color:#888;">אין ספקים ברשימה</td></tr>';
+                if (totalCell) totalCell.innerText = '0.00 ₪';
+                return;
+            }
+
+            reportTbody.innerHTML = rows.map(r => {
+                const isCredit = Number(r.amount) < 0;
+                return `
+                    <tr>
+                        <td style="font-weight:bold; background:#fafafa;">${esc(r.name)}</td>
+                        <td class="editable-cell">
+                            <input type="number" step="0.01" value="${r.amount}" 
+                                onchange="updateReportEdit('${esc(r.name)}', 'amount', this.value)" 
+                                style="${isCredit ? 'color:red; font-weight:bold;' : ''}">
+                        </td>
+                        <td class="editable-cell">
+                            <input type="text" value="${esc(r.method)}" 
+                                onchange="updateReportEdit('${esc(r.name)}', 'method', this.value)">
+                        </td>
+                        <td class="editable-cell">
+                            <input type="text" value="${esc(r.notes)}" 
+                                onchange="updateReportEdit('${esc(r.name)}', 'notes', this.value)">
+                        </td>
+                    </tr>`;
+            }).join('');
+
+            if (totalCell) {
+                totalCell.innerText = `${total.toFixed(2)} ₪`;
+            }
+        }
+
+        window.updateReportEdit = function(supplierName, field, value) {
+            if (!customReportEdits[supplierName]) {
+                customReportEdits[supplierName] = {};
+            }
+            if (field === 'amount') {
+                customReportEdits[supplierName].amount = parseFloat(value) || 0;
+            } else if (field === 'method') {
+                customReportEdits[supplierName].method = value;
+            } else if (field === 'notes') {
+                customReportEdits[supplierName].notes = value;
+            }
+            renderEditableReportTable();
+            persistReportEdits(getSelectedInvoiceMonth());
+        };
+
+        // בונה שורה לכל ספק ברשימה (גם בלי חשבוניות), ואחריהם ספקים שאינם ברשימה אך יש להם חשבוניות
+        function buildReportRows() {
+            const bySupplier = {};
+            monthlyInvoices.forEach(inv => {
+                if (!bySupplier[inv.supplier]) {
+                    bySupplier[inv.supplier] = { amount: 0, methods: new Set(), notes: [] };
+                }
+                bySupplier[inv.supplier].amount += Number(inv.amount) || 0;
+                if (inv.paymentMethod) bySupplier[inv.supplier].methods.add(inv.paymentMethod);
+                if (inv.notes && inv.notes !== 'חשבונית זיכוי') bySupplier[inv.supplier].notes.push(inv.notes);
+            });
+
+            const orderedNames = [...suppliersList, ...Object.keys(bySupplier).filter(s => !suppliersList.includes(s))];
+
+            return orderedNames.map(name => {
+                const info = bySupplier[name];
+                const edited = customReportEdits[name] || {};
+                const hasInvoices = !!info;
+                let amount = edited.amount !== undefined ? edited.amount : (hasInvoices ? info.amount : '');
+                const method = edited.method !== undefined ? edited.method : (hasInvoices ? (Array.from(info.methods).join(', ') || '') : '');
+                const notes = edited.notes !== undefined ? edited.notes : (hasInvoices ? (info.notes.join(' | ') || '') : '');
+                return { name, amount, method, notes };
+            });
+        }
+
+        function getFinalReportData() {
+            const rows = buildReportRows();
+            const total = rows.reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+            return { rows, total };
+        }
+
+        function populateSupplierSummaryOptions() {
+            const selectEl = document.getElementById('supplierSummarySelect');
+            if (!selectEl) return;
+
+            const uniqueSuppliers = [...new Set(monthlyInvoices.map(i => i.supplier))].sort((a,b)=>a.localeCompare(b,'he'));
+            
+            if (uniqueSuppliers.length === 0) {
+                selectEl.innerHTML = '<option value="">-- אין ספקים בחודש זה --</option>';
+                document.getElementById('supplierSummaryDisplay').classList.add('hidden');
+                return;
+            }
+
+            selectEl.innerHTML = '<option value="">-- בחר ספק להצגה בפירוט --</option>' +
+                uniqueSuppliers.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('');
+            
+            document.getElementById('supplierSummaryDisplay').classList.add('hidden');
+        }
+
+        window.renderSupplierSummary = function() {
+            const selectEl = document.getElementById('supplierSummarySelect');
+            const displayEl = document.getElementById('supplierSummaryDisplay');
+            const selectedSupplier = selectEl.value;
+
+            if (!selectedSupplier) {
+                displayEl.classList.add('hidden');
+                return;
+            }
+
+            const supplierInvoices = monthlyInvoices.filter(i => i.supplier === selectedSupplier);
+            let totalAmount = 0;
+            const itemMap = {};
+
+            supplierInvoices.forEach(inv => {
+                const invAmt = Number(inv.amount) || 0;
+                totalAmount += invAmt;
+                const isCredit = invAmt < 0;
+
+                if (Array.isArray(inv.items)) {
+                    inv.items.forEach(it => {
+                        const itemName = (it.name || 'פריט ללא שם').trim();
+                        let qty = Number(it.quantity) || 1;
+                        let price = Number(it.price) || 0;
+
+                        if (isCredit) {
+                            qty = -Math.abs(qty);
+                            price = -Math.abs(price);
+                        }
+
+                        if (!itemMap[itemName]) {
+                            itemMap[itemName] = { quantity: 0, totalPrice: 0 };
+                        }
+                        itemMap[itemName].quantity += qty;
+                        itemMap[itemName].totalPrice += price;
+                    });
+                }
+            });
+
+            const itemsList = Object.keys(itemMap);
+            let itemsHtml = '';
+
+            if (itemsList.length === 0) {
+                itemsHtml = '<p style="color:#666; font-size:0.85em; margin:4px 0;">לא זוהו פריטים בטקסט תחת ספק זה בחודש הנוכחי.</p>';
+            } else {
+                itemsHtml = itemsList.map(name => {
+                    const data = itemMap[name];
+                    return `<div style="padding:4px 0; border-bottom:1px dashed #e0e0e0; font-size:0.85em;">
+                        • <b>${esc(name)}</b> - כמות מצטברת: <b>${data.quantity}</b> ${data.totalPrice !== 0 ? '| סכום: <b>' + data.totalPrice.toFixed(2) + ' ₪</b>' : ''}
+                    </div>`;
+                }).join('');
+            }
+
+            displayEl.innerHTML = `
+                <h4 style="margin:0 0 6px 0; color:#1877f2;">סיכום ספציפי: ${esc(selectedSupplier)}</h4>
+                <div style="font-size:0.9em; font-weight:bold; margin-bottom:8px;">
+                    מספר חשבוניות: ${supplierInvoices.length} | סה"כ לתשלום נטו: <span style="color:${totalAmount < 0 ? '#d9534f' : '#27ae60'};">${totalAmount.toFixed(2)} ₪</span>
+                </div>
+                <div style="background:white; border:1px solid #e0e0e0; border-radius:6px; padding:8px; max-height:200px; overflow-y:auto;">
+                    <div style="font-size:0.8em; font-weight:bold; color:#555; margin-bottom:4px;">פירוט מוצרים מצטבר:</div>
+                    ${itemsHtml}
+                </div>
+            `;
+            displayEl.classList.remove('hidden');
+        };
+
+        window.searchAndSummarizeItems = function() {
+            const queryText = (document.getElementById('itemSearchQuery').value || '').trim().toLowerCase();
+            const resultsBox = document.getElementById('itemSearchResults');
+
+            if (!queryText) {
+                alert("אנא הכנס שם פריט לחיפוש.");
+                return;
+            }
+
+            let totalQuantity = 0;
+            let totalCost = 0;
+            let matchDetails = [];
+
+            monthlyInvoices.forEach(inv => {
+                const invoiceAmount = Number(inv.amount) || 0;
+                const isCreditInvoice = invoiceAmount < 0;
+
+                if (Array.isArray(inv.items)) {
+                    inv.items.forEach(it => {
+                        if (it.name && it.name.toLowerCase().includes(queryText)) {
+                            let qty = Number(it.quantity) || 1;
+                            let price = Number(it.price) || 0;
+
+                            if (isCreditInvoice) {
+                                qty = -Math.abs(qty);
+                                price = -Math.abs(price);
+                            }
+
+                            totalQuantity += qty;
+                            totalCost += price;
+                            matchDetails.push(`• ספק: <b>${esc(inv.supplier)}</b> | כמות: ${qty} | מחיר: ${price !== 0 ? price.toFixed(2) + ' ₪' : 'לא מפורט'}${isCreditInvoice ? ' (זיכוי)' : ''}`);
+                        }
+                    });
+                }
+            });
+
+            resultsBox.classList.remove('hidden');
+            if (matchDetails.length === 0) {
+                resultsBox.innerHTML = `לא נמצאו פריטים תואמים ל-"<b>${esc(queryText)}</b>" בחודש הנוכחי.`;
+            } else {
+                resultsBox.innerHTML = `
+                    <b>תוצאות חיפוש "${esc(queryText)}":</b><br>
+                    • סה"כ יחידות/כמות שנרכשה נטו: <b>${totalQuantity}</b><br>
+                    ${totalCost !== 0 ? '• סה"כ סכום פריטים אלו נטו: <b>' + totalCost.toFixed(2) + ' ₪</b><br>' : ''}
+                    <hr style="border:0; border-top:1px solid #ccc; margin:6px 0;">
+                    <b>פירוט הרכישות והזיכויים:</b><br>
+                    ${matchDetails.join('<br>')}
+                `;
+            }
+        };
+
+        window.exportInvoicesToPDF = async function() {
+            const { rows, total } = getFinalReportData();
+            if (rows.length === 0) { alert("אין נתונים לדוח לחודש זה."); return; }
+
+            const monthKey = getSelectedInvoiceMonth();
+            const [y, m] = monthKey.split('-');
+            const monthNames = ['ינואר','פברואר','מרץ','אפריל','מאי','יוני','יולי','אוגוסט','ספטמבר','אוקטובר','נובמבר','דצמבר'];
+            document.getElementById('invoicesPdfMonthTitle').innerText = `חודש: ${monthNames[parseInt(m)-1]} ${y}`;
+
+            const rowsHtml = rows.map(r => {
+                const noAmount = r.amount === '' || r.amount === null || r.amount === undefined;
+                const isCredit = !noAmount && Number(r.amount) < 0;
+                return `
+                    <tr>
+                        <td style="border:1px solid #999; padding:7px; font-size:14px;">${esc(r.name)}</td>
+                        <td style="border:1px solid #999; padding:7px; font-size:14px; ${isCredit ? 'color:red; font-weight:bold;' : ''}">${noAmount ? '' : Number(r.amount).toFixed(2) + ' ₪ ' + (isCredit ? '(זיכוי)' : '')}</td>
+                        <td style="border:1px solid #999; padding:7px; font-size:14px;">${esc(r.method || '')}</td>
+                        <td style="border:1px solid #999; padding:7px; font-size:14px;">${esc(r.notes || '')}</td>
+                    </tr>`;
+            }).join('');
+
+            document.getElementById('invoicesPdfTableBody').innerHTML = rowsHtml;
+            document.getElementById('invoicesPdfTotalCell').innerText = `${total.toFixed(2)} ₪`;
+
+            const exportContainer = document.getElementById('invoicesPdfContainer');
+            await new Promise(resolve => setTimeout(resolve, 300));
+
+            try {
+                const canvas = await html2canvas(exportContainer, { scale: 2, useCORS: true, logging: false });
+                if (!canvas || canvas.width === 0 || canvas.height === 0) {
+                    throw new Error("רנדור התמונה נכשל");
+                }
+                const imgData = canvas.toDataURL('image/jpeg', 0.95);
+                const { jsPDF } = window.jspdf;
+                const pdf = new jsPDF('p', 'mm', 'a4');
+                const pageWidth = pdf.internal.pageSize.getWidth();
+                const pageHeight = pdf.internal.pageSize.getHeight();
+
+                let imgWidth = pageWidth - 16;
+                let imgHeight = (canvas.height * imgWidth) / canvas.width;
+
+                if (imgHeight > pageHeight - 16) {
+                    imgHeight = pageHeight - 16;
+                    imgWidth = (canvas.width * imgHeight) / canvas.height;
+                }
+
+                const x = (pageWidth - imgWidth) / 2;
+                const y = 8;
+
+                pdf.addImage(imgData, 'JPEG', x, y, imgWidth, imgHeight);
+
+                const blob = pdf.output('blob');
+                const blobUrl = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = blobUrl;
+                a.download = `invoices-summary-${monthKey}.pdf`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+            } catch(err) {
+                alert("שגיאה בהפקת ה-PDF: " + err.message);
+            }
+        };
+
+        window.exportInvoicesToExcel = function() {
+            const { rows, total } = getFinalReportData();
+            if (rows.length === 0) {
+                alert("אין נתונים לדוח לחודש זה לייצוא.");
+                return;
+            }
+
+            const monthKey = getSelectedInvoiceMonth();
+            const excelData = [
+                ["", "שם הספק", "סכום לתשלום", "אמצעי תשלום", "הערות"]
+            ];
+
+            rows.forEach(r => {
+                excelData.push([
+                    "",
+                    r.name,
+                    (r.amount === '' || r.amount === null || r.amount === undefined) ? '' : (Number(r.amount) || 0),
+                    r.method || '',
+                    r.notes || ''
+                ]);
+            });
+
+            excelData.push(["", "סה\"כ לתשלום נטו", total, "", ""]);
+
+            const ws = XLSX.utils.aoa_to_sheet(excelData);
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, "סיכום חודשי");
+
+            const wbArray = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+            const blob = new Blob([wbArray], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+            const blobUrl = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = blobUrl;
+            a.download = `ספקים_חודשי_${monthKey}.xlsx`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+        };
+
+
+        // ================= גרפים =================
+        const HE_MONTHS_SHORT = ['ינו','פבר','מרץ','אפר','מאי','יונ','יול','אוג','ספט','אוק','נוב','דצמ'];
+        function monthKeysBack(n, endKey) {
+            const [y, m] = endKey.split('-').map(Number);
+            const out = [];
+            for (let i = n - 1; i >= 0; i--) {
+                const d = new Date(y, m - 1 - i, 1);
+                out.push(d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0'));
+            }
+            return out;
+        }
+        const fmtMoney = v => Math.round(v).toLocaleString('he-IL');
+
+        window.renderSpendCharts = async function() {
+            const box = document.getElementById('spendChartsBox');
+            box.innerHTML = '⏳ טוען...';
+            try {
+                const sel = getSelectedInvoiceMonth();
+                const keys = monthKeysBack(6, sel);
+                const snap = await getDocs(query(getInvoicesCollection(), where('monthKey', 'in', keys)));
+                const byMonth = {}, bySup = {};
+                keys.forEach(k => byMonth[k] = 0);
+                snap.forEach(d => {
+                    const x = d.data();
+                    if (!x || x.docType === 'delivery_note') return;   // תעודות משלוח לא נספרות כהוצאה
+                    const a = Number(x.amount) || 0;
+                    byMonth[x.monthKey] = (byMonth[x.monthKey] || 0) + a;
+                    if (x.monthKey === sel) bySup[x.supplier] = (bySup[x.supplier] || 0) + a;
+                });
+                const max = Math.max(1, ...keys.map(k => Math.abs(byMonth[k])));
+                const cols = keys.map(k => {
+                    const v = byMonth[k];
+                    const h = Math.round(Math.abs(v) / max * 100);
+                    return `<div class="ch-col"><div class="val">${fmtMoney(v)}</div><div class="bar ${v < 0 ? 'neg' : ''} ${k === sel ? 'cur' : ''}" style="height:${h}%"></div></div>`;
+                }).join('');
+                const labels = keys.map(k => `<span>${HE_MONTHS_SHORT[parseInt(k.split('-')[1]) - 1]}</span>`).join('');
+                const prev = byMonth[keys[keys.length - 2]] || 0, cur = byMonth[sel] || 0;
+                const diff = prev ? ((cur - prev) / Math.abs(prev) * 100) : null;
+                const diffTxt = diff === null ? '' : `<div style="font-size:0.85em; margin-top:4px;">לעומת החודש הקודם: <b style="color:${diff > 0 ? '#c0392b' : '#1e8449'}">${diff > 0 ? '▲' : '▼'} ${Math.abs(diff).toFixed(1)}%</b></div>`;
+                const sups = Object.entries(bySup).sort((a, b) => b[1] - a[1]).slice(0, 8);
+                const supMax = Math.max(1, ...sups.map(e => Math.abs(e[1])));
+                const supHtml = sups.length ? sups.map(([n, v]) =>
+                    `<div class="ch-hrow"><div style="display:flex; justify-content:space-between;"><span>${esc(n)}</span><b>${fmtMoney(v)} ₪</b></div><div class="track"><div class="fill" style="width:${Math.round(Math.abs(v) / supMax * 100)}%"></div></div></div>`).join('')
+                    : '<div style="color:#777; font-size:0.85em;">אין חשבוניות בחודש שנבחר.</div>';
+                box.innerHTML = `<b>הוצאות לפי חודש (₪, נטו)</b><div class="ch-bars">${cols}</div><div class="ch-labels">${labels}</div>${diffTxt}
+                    <div style="margin-top:12px;"><b>לפי ספק בחודש שנבחר</b></div>${supHtml}`;
+            } catch (e) {
+                box.innerHTML = '';
+                alert('שגיאה בטעינת הגרפים: ' + (e && e.message ? e.message : ''));
+            }
+        };
+
+        window.renderPriceTrend = async function() {
+            const box = document.getElementById('priceTrendBox');
+            const q = normalizeItemKey(document.getElementById('trendItemQuery').value || '');
+            if (!q) { alert('הכנס שם פריט.'); return; }
+            box.innerHTML = '⏳ טוען...';
+            try {
+                const found = [];
+                for (const sup of suppliersList) {
+                    const book = await loadPriceBook(sup);
+                    Object.values(book).forEach(rec => {
+                        if (rec.key && (rec.key.includes(q) || q.includes(rec.key)) && Array.isArray(rec.history) && rec.history.length) found.push({ sup, rec });
+                    });
+                }
+                if (!found.length) { box.innerHTML = 'לא נמצאה היסטוריית מחירים לפריט הזה.'; return; }
+                box.innerHTML = found.slice(0, 6).map(({ sup, rec }) => {
+                    const pts = rec.history.slice(-10);
+                    const ps = pts.map(p => p.p);
+                    const lo = Math.min(...ps), hi = Math.max(...ps), span = (hi - lo) || 1;
+                    const xy = pts.map((p, i) => `${pts.length === 1 ? 100 : 8 + i * (184 / (pts.length - 1))},${44 - (p.p - lo) / span * 36}`).join(' ');
+                    const first = ps[0], last = ps[ps.length - 1];
+                    const ch = first ? ((last - first) / first * 100) : 0;
+                    return `<div class="ch-spark"><div style="display:flex; justify-content:space-between;"><span>${esc(rec.name || rec.key)} · ${esc(sup)}</span><b>${last.toFixed(2)} ₪</b></div>
+                        <svg viewBox="0 0 200 50" style="width:100%; height:60px;"><polyline points="${xy}" fill="none" stroke="#8e44ad" stroke-width="2"/>${pts.map((p, i) => `<circle cx="${pts.length === 1 ? 100 : 8 + i * (184 / (pts.length - 1))}" cy="${44 - (p.p - lo) / span * 36}" r="2.5" fill="#8e44ad"/>`).join('')}</svg>
+                        <div style="color:#555;">${esc(pts[0].d)} → ${esc(pts[pts.length - 1].d)} · <b style="color:${ch > 0 ? '#c0392b' : '#1e8449'}">${ch > 0 ? '▲' : ch < 0 ? '▼' : ''} ${Math.abs(ch).toFixed(1)}%</b></div></div>`;
+                }).join('');
+            } catch (e) {
+                box.innerHTML = '';
+                alert('שגיאה בטעינת המגמה: ' + (e && e.message ? e.message : ''));
+            }
+        };
+
+        // ================= גיבוי =================
+        const BACKUP_SETTINGS_ALLOWED = id => id === 'suppliers_list' || id === 'supplier_aliases' || id.startsWith('price_book_') || id.startsWith('report_edits');
+        function backupKey() { return 'invoices_last_backup_' + RESTAURANT_ID; }
+        function refreshBackupInfo() {
+            const el = document.getElementById('backupInfo');
+            if (!el) return;
+            let last = null; try { last = localStorage.getItem(backupKey()); } catch (e) {}
+            el.textContent = last ? 'גיבוי אחרון: ' + new Date(Number(last)).toLocaleDateString('he-IL') : 'עוד לא בוצע גיבוי במכשיר הזה.';
+        }
+        window.exportBackup = async function() {
+            try {
+                showToast('⏳ מכין גיבוי...');
+                const [invSnap, setSnap] = await Promise.all([getDocs(getInvoicesCollection()), getDocs(getSettingsCollection())]);
+                const invoices = []; invSnap.forEach(d => invoices.push(d.data()));
+                const settings = {}; setSnap.forEach(d => { if (BACKUP_SETTINGS_ALLOWED(d.id)) settings[d.id] = d.data(); });   // בלי סיסמאות/הגדרות מנהל
+                const payload = { app: 'invoices', version: 1, exportedAt: new Date().toISOString(), restaurant: RESTAURANT_ID, invoices, settings };
+                const name = `גיבוי_חשבוניות_${RESTAURANT_ID}_${new Date().toISOString().slice(0, 10)}.json`;
+                const file = new File([JSON.stringify(payload)], name, { type: 'application/json' });
+                if (navigator.canShare && navigator.canShare({ files: [file] })) {
+                    await navigator.share({ files: [file], title: name });
+                } else {
+                    const a = document.createElement('a');
+                    a.href = URL.createObjectURL(file); a.download = name;
+                    document.body.appendChild(a); a.click(); a.remove();
+                    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+                }
+                try { localStorage.setItem(backupKey(), String(Date.now())); } catch (e) {}
+                refreshBackupInfo();
+                showToast(`✅ הגיבוי מוכן (${invoices.length} מסמכים)`, 'ok');
+            } catch (e) {
+                if (e && e.name === 'AbortError') return;   // המשתמש סגר את חלון השיתוף
+                alert('שגיאה ביצירת הגיבוי: ' + (e && e.message ? e.message : ''));
+            }
+        };
+        function backupReminder() {
+            refreshBackupInfo();
+            let last = 0; try { last = Number(localStorage.getItem(backupKey())) || 0; } catch (e) {}
+            if (Date.now() - last > 30 * 86400000) showToast('💾 עבר יותר מחודש מהגיבוי האחרון - מומלץ לגבות (כרטיס "גיבוי נתונים").');
+        }
+        window.addEventListener('load', () => setTimeout(backupReminder, 5000));
+
+        initRestaurantId();
