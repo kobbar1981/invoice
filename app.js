@@ -484,19 +484,23 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
             if (prevVal && suppliersList.includes(prevVal)) sel.value = prevVal;
         }
 
+        window.renderSupplierManageList = renderSupplierManageList;   // נדרש כדי ש-oninput בשדה החיפוש יראה את הפונקציה (הקוד הוא module)
         function renderSupplierManageList() {
             const container = document.getElementById('supplierListManage');
             if (!container) return;
-            if (suppliersList.length === 0) {
-                container.innerHTML = '<p style="color:#888; font-size:0.85em;">אין ספקים ברשימה.</p>';
+            const filterEl = document.getElementById('supplierFilterInput');
+            const q = filterEl ? (filterEl.value || '').trim() : '';
+            const shown = q ? suppliersList.filter(s => s.includes(q)) : suppliersList;
+            if (shown.length === 0) {
+                container.innerHTML = '<p style="color:#888; font-size:0.85em;">' + (suppliersList.length ? 'לא נמצא ספק.' : 'אין ספקים ברשימה.') + '</p>';
                 return;
             }
-            container.innerHTML = suppliersList.map(s => `
+            container.innerHTML = shown.map(s => `
                 <div class="supplier-manage-item">
                     <span>${esc(s)}</span>
                     <span>
-                        <button class="edit-btn" data-name="${esc(s)}" onclick="editSupplierName(this.dataset.name)">שנה שם</button>
-                        <button class="delete-btn" data-name="${esc(s)}" onclick="removeSupplierFromList(this.dataset.name)">הסר</button>
+                        <button class="edit-btn" title="שנה שם" data-name="${esc(s)}" onclick="editSupplierName(this.dataset.name)">✏️</button>
+                        <button class="delete-btn" title="הסר" data-name="${esc(s)}" onclick="removeSupplierFromList(this.dataset.name)">🗑️</button>
                     </span>
                 </div>`).join('');
         }
@@ -1882,8 +1886,44 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
             } catch (e) { console.warn("שמירת עריכות הדוח נכשלה:", e); }
         }
 
+        // מציג רק את 10 החשבוניות הראשונות (לפי ספק) כדי לקצר את הגלילה; כפתור "הצג הכול" פותח את השאר
+        let invoicesShown = 10, invoicesShownMonth = null;
+        window.showAllInvoices = function() { invoicesShown = Infinity; renderInvoicesRows(); };
+        function renderInvoicesRows() {
+            const tbody = document.getElementById('invoicesTableBody');
+            if (!tbody) return;
+            {
+                const list = monthlyInvoices.slice(0, invoicesShown);
+                const rowsHtml = list.map(inv => {
+                    const amt = Number(inv.amount) || 0;
+                    const isCredit = amt < 0;
+                    const itemsCount = Array.isArray(inv.items) ? inv.items.length : 0;
+                    const itemsTooltip = itemsCount > 0 ? `${itemsCount} פריטים` : '-';
+                    
+                    return `
+                        <tr class="${isCredit ? 'credit-row' : ''}">
+                            <td>${esc(inv.supplier)}</td>
+                            <td>${esc(inv.invoiceNumber || '-')}${inv.invoiceDate ? `<br><span style="font-size:0.8em; color:#777;">${esc(inv.invoiceDate.split('-').reverse().join('/'))}</span>` : ''}</td>
+                            <td class="${isCredit ? 'credit-badge' : ''}">${amt.toFixed(2)} ₪ ${isCredit ? '(זיכוי)' : ''}</td>
+                            <td>${esc(inv.paymentMethod || '-')}</td>
+                            <td>${esc(itemsTooltip)}${handwrittenBadgeHtml(inv)}</td>
+                            <td>${esc(inv.notes || '-')}</td>
+                            <td style="white-space:nowrap;">
+                                ${inv.imageUrl ? `<button class="view-img-btn" data-url="${esc(inv.imageUrl)}" onclick="openImageViewer(this.dataset.url)">📷 תמונה</button>` : ''}
+                                <button class="edit-btn" data-id="${esc(inv.id)}" onclick="editInvoiceEntry(this.dataset.id)">ערוך</button>
+                                <button class="delete-btn" data-id="${esc(inv.id)}" onclick="deleteInvoiceEntry(this.dataset.id)">מחק</button>
+                            </td>
+                        </tr>`;
+                }).join('');
+                const rest = monthlyInvoices.length - list.length;
+                const moreRow = rest > 0 ? `<tr><td colspan="7" style="text-align:center;"><button onclick="showAllInvoices()" style="width:auto; margin-top:0; background:#3498db;">הצג הכול (${rest} נוספות)</button></td></tr>` : '';
+                tbody.innerHTML = rowsHtml + moreRow;
+            }
+        }
+
         window.loadInvoicesForMonth = async function() {
             const monthKey = getSelectedInvoiceMonth();
+            if (invoicesShownMonth !== monthKey) { invoicesShown = 10; invoicesShownMonth = monthKey; }
             const tbody = document.getElementById('invoicesTableBody');
             tbody.innerHTML = '<tr><td colspan="7" style="color:#888;">טוען נתונים...</td></tr>';
 
@@ -1914,27 +1954,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
                     return;
                 }
 
-                tbody.innerHTML = monthlyInvoices.map(inv => {
-                    const amt = Number(inv.amount) || 0;
-                    const isCredit = amt < 0;
-                    const itemsCount = Array.isArray(inv.items) ? inv.items.length : 0;
-                    const itemsTooltip = itemsCount > 0 ? `${itemsCount} פריטים` : '-';
-                    
-                    return `
-                        <tr class="${isCredit ? 'credit-row' : ''}">
-                            <td>${esc(inv.supplier)}</td>
-                            <td>${esc(inv.invoiceNumber || '-')}${inv.invoiceDate ? `<br><span style="font-size:0.8em; color:#777;">${esc(inv.invoiceDate.split('-').reverse().join('/'))}</span>` : ''}</td>
-                            <td class="${isCredit ? 'credit-badge' : ''}">${amt.toFixed(2)} ₪ ${isCredit ? '(זיכוי)' : ''}</td>
-                            <td>${esc(inv.paymentMethod || '-')}</td>
-                            <td>${esc(itemsTooltip)}${handwrittenBadgeHtml(inv)}</td>
-                            <td>${esc(inv.notes || '-')}</td>
-                            <td style="white-space:nowrap;">
-                                ${inv.imageUrl ? `<button class="view-img-btn" data-url="${esc(inv.imageUrl)}" onclick="openImageViewer(this.dataset.url)">📷 תמונה</button>` : ''}
-                                <button class="edit-btn" data-id="${esc(inv.id)}" onclick="editInvoiceEntry(this.dataset.id)">ערוך</button>
-                                <button class="delete-btn" data-id="${esc(inv.id)}" onclick="deleteInvoiceEntry(this.dataset.id)">מחק</button>
-                            </td>
-                        </tr>`;
-                }).join('');
+                renderInvoicesRows();
             } catch(e) {
                 tbody.innerHTML = '<tr><td colspan="7" style="color:red;">שגיאה בטעינת החשבוניות.</td></tr>';
             }

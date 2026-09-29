@@ -42,7 +42,6 @@
     <!-- מסך נעילה -->
     <div class="card" id="lockedView">
         <h2>הגנת סיסמה למנהל</h2>
-        <p style="font-size:0.9em; color:#555;">האפליקציה מוגנת באמצעות סיסמת מנהל לשמירה על הנתונים.</p>
         <button onclick="unlockApp()" style="background-color:#27ae60; max-width:260px; margin:0 auto;">כניסה</button>
     </div>
 
@@ -56,7 +55,7 @@
             </div>
 
             <div class="form-group">
-                <label>צילום או העלאת מסמך (חשבונית / תעודת משלוח):</label>
+                <label>צילום / העלאת מסמך:</label>
                 <div style="display:flex; gap:8px;">
                     <button type="button" class="upload-tile" data-recognition-trigger onclick="openCameraModal()">
                         <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
@@ -68,24 +67,23 @@
                     </button>
                 </div>
                 <input type="file" accept="image/jpeg,image/jpg,image/png,image/webp,image/heic,image/heif,.pdf,application/pdf" id="fileUploadInput" class="hidden" multiple>
-                <p style="font-size:0.75em; color:#777; margin:4px 0 0 0;">מסמך מרובה עמודים: בחר כמה תמונות יחד, או קובץ PDF (עד 8 עמודים). בצילום - המערכת תשאל אם להוסיף עוד עמוד. המערכת מזהה לבד אם זו חשבונית או תעודת משלוח (אפשר לשנות לפני השמירה).</p>
+                <p style="font-size:0.75em; color:#777; margin:4px 0 0 0;">אפשר לבחור כמה תמונות, או PDF (עד 8 עמודים).</p>
             </div>
 
-            <div class="hidden" id="invoiceRecognizing">⏳ מעבד תמונות, פריטים ונתונים בחשבונית באמצעות פלאגין AI, אנא המתן...</div>
+            <div class="hidden" id="invoiceRecognizing">⏳ מעבד את המסמך, אנא המתן...</div>
 
             <div class="hidden" id="invoiceConfirmForm" style="margin-top:10px;">
                 <h4 id="confirmFormTitle" style="margin-bottom:8px;">אישור ואימות חשבונית</h4>
                 <div id="duplicateWarningBox" class="duplicate-warning hidden">⚠️ אזהרה: נראית חשבונית זו כבר קיימת במערכת!</div>
-                <div id="mismatchWarningBox" class="duplicate-warning hidden" style="background:#fff3cd; border-color:#ffeeba; color:#856404;">⚠️ סכום הפריטים שזוהו לא תואם לסכום הכולל - ייתכן שה-AI פספס או המציא פרט. בדוק ידנית מול החשבונית המקורית.</div>
+                <div id="mismatchWarningBox" class="duplicate-warning hidden" style="background:#fff3cd; border-color:#ffeeba; color:#856404;">⚠️ סכום הפריטים לא תואם לסכום הכולל - בדוק מול החשבונית.</div>
                 <div id="priceAlertBox" class="hidden" style="border-radius:8px; padding:8px; margin-bottom:8px; font-size:0.85em; text-align:right;"></div>
-                <p style="font-size:0.8em; color:#555; margin:0 0 8px 0;"><b>חובה לבדוק ולעדכן</b> את הפרטים שזוהו לפני השמירה - זיהוי AI עלול לטעות:</p>
+                <p style="font-size:0.8em; color:#555; margin:0 0 8px 0;"><b>בדוק את הפרטים</b> לפני השמירה (זיהוי AI עלול לטעות):</p>
                 <div id="invoicePreviewImgWrap" style="text-align:center; margin-bottom:10px;"></div>
                 <div id="addPagesRow" class="hidden" style="margin-bottom:10px;">
                     <div style="display:flex; gap:8px;">
                         <button type="button" data-recognition-trigger onclick="startAddPageCamera()" style="flex:1; padding:8px; font-size:0.85em; background:#fff; color:#1877f2; border:1px solid #1877f2; border-radius:8px;">📷 הוסף עמוד (צילום)</button>
                         <button type="button" data-recognition-trigger onclick="document.getElementById('addPageFileInput').click()" style="flex:1; padding:8px; font-size:0.85em; background:#fff; color:#1877f2; border:1px solid #1877f2; border-radius:8px;">📎 הוסף עמוד (קובץ)</button>
                     </div>
-                    <div style="font-size:0.75em; color:#777; margin-top:2px;">העמודים יתווספו לאותו מסמך; פריטים וסכום כולל יתעדכנו, ושדות שכבר מילאת לא יידרסו.</div>
                     <input type="file" accept="image/jpeg,image/jpg,image/png,image/webp,image/heic,image/heif,.pdf,application/pdf" id="addPageFileInput" class="hidden" multiple>
                 </div>
                 <div class="form-group" id="docTypeGroup">
@@ -132,12 +130,12 @@
                     <div id="invoiceItemsDisplay" class="items-list-box">טרם זוהו פרטים</div>
                 </div>
                 <div class="form-group hidden" id="handwrittenBox" style="background:#fffbea; border:1px solid #f1c40f; border-radius:8px; padding:8px;">
-                    <label style="color:#7d6608;">✍️ נמצא כתב יד במסמך - סמן מה רלוונטי (מה שמסומן יישמר עם המסמך):</label>
+                    <label style="color:#7d6608;">✍️ נמצא כתב יד - סמן מה רלוונטי:</label>
                     <div id="handwrittenList" style="font-size:0.9em;"></div>
                 </div>
                 <div id="handwritingStatus" style="font-size:0.78em; margin:-6px 0 8px 0;"></div>
                 <div class="form-group">
-                    <label>הערות (ניתן לרשום הערה פנימית):</label>
+                    <label>הערות:</label>
                     <input type="text" id="invoiceNotesInput" placeholder="הכללת הערה חודשית/פנימית לחשבונית...">
                 </div>
                 <div class="modal-actions">
@@ -150,14 +148,14 @@
         <!-- התראות שינוי מחיר -->
         <div class="card hidden" id="priceAlertsCard" style="border:2px solid #e67e22;">
             <h3 style="margin-top:0; color:#d35400;">📈 שינויי מחיר החודש</h3>
-            <p style="font-size:0.8em; color:#555; margin:-4px 0 6px 0;">פריטים שמחירם ליחידה עלה לעומת הרכישה הקודמת מאותו ספק:</p>
+            <p style="font-size:0.8em; color:#555; margin:-4px 0 6px 0;">מחיר ליחידה שעלה לעומת הרכישה הקודמת:</p>
             <div class="table-wrapper" id="priceAlertsList"></div>
         </div>
 
         <!-- תעודות משלוח והתאמה לחשבונית מרכזת -->
         <div class="card" id="deliveryCard" style="border:2px solid #16a085;">
             <h3 style="margin-top:0; color:#16a085;">🚚 תעודות משלוח והתאמה לחשבונית מרכזת</h3>
-            <p style="font-size:0.8em; color:#555; margin:-4px 0 8px 0;">תעודות משלוח נסרקות מאותו אזור סריקה שלמעלה - המערכת מזהה אותן לבד. בסוף החודש, אחרי קליטת החשבונית המרכזת, בחר ספק כדי לבדוק שהתעודות תואמות אליה.</p>
+            <p style="font-size:0.8em; color:#555; margin:-4px 0 8px 0;">בסוף החודש, בחר ספק לבדיקת התאמה לחשבונית המרכזת.</p>
 
             <h4 style="margin:14px 0 4px 0;">תעודות שנקלטו לחודש הנוכחי:</h4>
             <div class="table-wrapper">
@@ -195,7 +193,7 @@
         <div class="card">
             <h3 style="margin-top:0;">📊 סיכום חודשי ופרטים לפי ספק</h3>
             <div class="form-group">
-                <label>בחר ספק להצגת פירוט המוצרים שרכשנו ממנו החודש:</label>
+                <label>פירוט מוצרים לפי ספק:</label>
                 <select id="supplierSummarySelect" onchange="renderSupplierSummary()">
                     <option value="">-- בחר ספק --</option>
                 </select>
@@ -241,7 +239,7 @@
 
         <!-- טבלת חשבוניות גולמיות -->
         <div class="card">
-            <h3 style="margin-top:0;">חשבוניות שנקלטו לחודש הנוכחי:</h3>
+            <h3 style="margin-top:0;">חשבוניות החודש</h3>
             <div class="table-wrapper">
                 <table>
                     <thead>
@@ -265,7 +263,6 @@
         <!-- דוח ספקים חודשי אדיטבילי לייצוא -->
         <div class="card" style="border: 2px solid #34495e;">
             <h3 style="margin-top:0; color:#34495e;">📋 דוח ספקים חודשי מסוכם (ניתן לעריכה ישירה)</h3>
-            <p style="font-size:0.8em; color:#555; text-align:center; margin-top:-4px;">טבלה זו מסכמת שורה ספציפית, וההורדה (PDF / אקסל) תיווצר בדיוק לפי השינויים כאן:</p>
             <div class="table-wrapper">
                 <table>
                     <thead>
@@ -301,7 +298,8 @@
                 <input type="text" id="newSupplierNameInput" placeholder="שם ספק חדש...">
                 <button onclick="addSupplierToList()" style="width:auto; background-color:#3498db; white-space:nowrap;">הוסף</button>
             </div>
-            <div id="supplierListManage" style="margin-top:10px;"></div>
+            <input type="text" id="supplierFilterInput" placeholder="🔍 חפש ספק..." oninput="renderSupplierManageList()" style="margin-top:8px;">
+            <div id="supplierListManage" style="margin-top:6px;"></div>
         </div>
     </div>
 
