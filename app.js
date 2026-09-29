@@ -2348,22 +2348,116 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
             }
         };
 
-        // ================= גיבוי =================
+        // ================= גיבוי בענן (Firestore) =================
+        const BACKUP_KEEP = 10;              // כמה גיבויים שומרים (הישנים נמחקים)
+        const BACKUP_CHUNK = 300000;         // גודל חתיכה במסמך (מסמך Firestore מוגבל ל-1MB)
+        const AUTO_BACKUP_DAYS = 7;
         const BACKUP_SETTINGS_ALLOWED = id => id === 'suppliers_list' || id === 'supplier_aliases' || id.startsWith('price_book_') || id.startsWith('report_edits');
-        function backupKey() { return 'invoices_last_backup_' + RESTAURANT_ID; }
-        function refreshBackupInfo() {
-            const el = document.getElementById('backupInfo');
-            if (!el) return;
-            let last = null; try { last = localStorage.getItem(backupKey()); } catch (e) {}
-            el.textContent = last ? 'גיבוי אחרון: ' + new Date(Number(last)).toLocaleDateString('he-IL') : 'עוד לא בוצע גיבוי במכשיר הזה.';
+        const backupDocId = ts => `backup_${ts}`;
+
+        async function buildBackupPayload() {
+            const [invSnap, setSnap] = await Promise.all([getDocs(getInvoicesCollection()), getDocs(getSettingsCollection())]);
+            const invoices = []; invSnap.forEach(d => invoices.push(d.data()));
+            const settings = {}; setSnap.forEach(d => { if (BACKUP_SETTINGS_ALLOWED(d.id)) settings[d.id] = d.data(); });   // בלי סיסמאות/הגדרות מנהל/גיבויים קודמים
+            return { app: 'invoices', version: 1, exportedAt: new Date().toISOString(), restaurant: RESTAURANT_ID, invoices, settings };
         }
+
+        async function writeOps(ops, perBatch) {
+            for (let i = 0; i < ops.length; i += perBatch) {
+                const batch = writeBatch(db);
+                ops.slice(i, i + perBatch).forEach(([ref, data]) => batch.set(ref, data));
+                await batch.commit();
+            }
+        }
+
+        async function listCloudBackups() {
+            const snap = await getDocs(query(getSettingsCollection(), where('type', '==', 'backup_meta')));
+            const out = []; snap.forEach(d => out.push(d.data()));
+            return out.sort((a, b) => b.ts - a.ts);
+        }
+
+        async function createCloudBackup(kind) {
+            const payload = await buildBackupPayload();
+            const text = JSON.stringify(payload);
+            const ts = Date.now();
+            const chunks = [];
+            for (let i = 0; i < text.length;) {
+                let end = Math.min(i + BACKUP_CHUNK, text.length);
+                if (end < text.length) { const c = text.charCodeAt(end - 1); if (c >= 0xD800 && c <= 0xDBFF) end--; }   // לא חותכים באמצע אימוג'י
+                chunks.push(text.slice(i, end)); i = end;
+            }
+            await writeOps(chunks.map((c, i) => [getSettingsDoc(`${backupDocId(ts)}_c${i}`), { type: 'backup_chunk', ts, idx: i, data: c }]), 10);
+            // המסמך המתאר נכתב אחרון - אם הוא קיים, הגיבוי שלם
+            await writeOps([[getSettingsDoc(`${backupDocId(ts)}_meta`), { type: 'backup_meta', ts, kind, invoices: payload.invoices.length, chunks: chunks.length, chars: text.length }]], 1);
+            await pruneCloudBackups();
+            return ts;
+        }
+
+        async function deleteCloudBackup(meta) {
+            for (let i = 0; i < meta.chunks; i++) { try { await deleteDoc(getSettingsDoc(`${backupDocId(meta.ts)}_c${i}`)); } catch (e) {} }
+            await deleteDoc(getSettingsDoc(`${backupDocId(meta.ts)}_meta`));
+        }
+
+        async function pruneCloudBackups() {
+            try {
+                const all = await listCloudBackups();
+                for (const m of all.slice(BACKUP_KEEP)) await deleteCloudBackup(m);
+            } catch (e) { console.warn('ניקוי גיבויים ישנים נכשל:', e); }
+        }
+
+        async function loadCloudBackup(meta) {
+            const parts = await Promise.all(Array.from({ length: meta.chunks }, (_, i) => getDoc(getSettingsDoc(`${backupDocId(meta.ts)}_c${i}`))));
+            if (parts.some(p => !p.exists())) throw new Error('הגיבוי פגום (חסרות חתיכות).');
+            return JSON.parse(parts.map(p => p.data().data).join(''));
+        }
+
+        async function askAdminPassword() {
+            const raw = await appPrompt('פעולה רגישה - הקלד סיסמת מנהל:', '', { password: true });
+            if (raw === null) return false;
+            const pass = raw.trim();
+            let cfg = null;
+            const snap = await getDoc(getSettingsDoc('manager_config'));
+            if (snap.exists()) cfg = snap.data();
+            let ok;
+            if (cfg && cfg.passwordHash && cfg.salt) ok = (await hashPassword(pass, cfg.salt)) === cfg.passwordHash;
+            else if (cfg && cfg.password) ok = (pass === String(cfg.password));
+            else ok = (pass === LEGACY_DEFAULT_PASSWORD);
+            if (!ok) alert('סיסמה שגויה.');
+            return ok;
+        }
+
+        const KIND_LABEL = { manual: 'ידני', auto: 'אוטומטי', 'pre-restore': 'לפני שחזור' };
+        function renderBackupList(list) {
+            const box = document.getElementById('backupList');
+            const info = document.getElementById('backupInfo');
+            if (info) info.textContent = list.length ? 'גיבוי אחרון: ' + new Date(list[0].ts).toLocaleString('he-IL', { dateStyle: 'short', timeStyle: 'short' }) : 'עוד לא בוצע גיבוי בענן.';
+            if (!box) return;
+            window.__backupList = list;
+            box.innerHTML = list.map((m, i) => `
+                <div style="border:1px solid #e3e6ea; border-radius:8px; padding:6px 8px; margin-bottom:6px; display:flex; justify-content:space-between; align-items:center; gap:8px; font-size:0.85em;">
+                    <div>${new Date(m.ts).toLocaleString('he-IL', { dateStyle: 'short', timeStyle: 'short' })}<br><span style="color:#666;">${esc(KIND_LABEL[m.kind] || m.kind)} · ${m.invoices} מסמכים</span></div>
+                    <button onclick="restoreCloudBackup(${i})" style="width:auto; margin-top:0; padding:6px 10px; background:#c0392b;">שחזר</button>
+                </div>`).join('');
+        }
+        async function refreshBackupList() {
+            try { const list = await listCloudBackups(); renderBackupList(list); return list; }
+            catch (e) { console.warn('טעינת רשימת גיבויים נכשלה:', e); return []; }
+        }
+
+        window.cloudBackupNow = async function() {
+            if (navigator.onLine === false) { alert('אין אינטרנט - אי אפשר לגבות לענן כרגע.'); return; }
+            try {
+                showToast('⏳ מגבה לענן...');
+                await createCloudBackup('manual');
+                await refreshBackupList();
+                showToast('✅ הגיבוי נשמר בענן', 'ok');
+            } catch (e) { alert('שגיאה בגיבוי לענן: ' + (e && e.message ? e.message : '')); }
+        };
+
         window.exportBackup = async function() {
             try {
-                showToast('⏳ מכין גיבוי...');
-                const [invSnap, setSnap] = await Promise.all([getDocs(getInvoicesCollection()), getDocs(getSettingsCollection())]);
-                const invoices = []; invSnap.forEach(d => invoices.push(d.data()));
-                const settings = {}; setSnap.forEach(d => { if (BACKUP_SETTINGS_ALLOWED(d.id)) settings[d.id] = d.data(); });   // בלי סיסמאות/הגדרות מנהל
-                const payload = { app: 'invoices', version: 1, exportedAt: new Date().toISOString(), restaurant: RESTAURANT_ID, invoices, settings };
+                showToast('⏳ מכין קובץ...');
+                const payload = await buildBackupPayload();
                 const name = `גיבוי_חשבוניות_${RESTAURANT_ID}_${new Date().toISOString().slice(0, 10)}.json`;
                 const file = new File([JSON.stringify(payload)], name, { type: 'application/json' });
                 if (navigator.canShare && navigator.canShare({ files: [file] })) {
@@ -2374,19 +2468,88 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
                     document.body.appendChild(a); a.click(); a.remove();
                     setTimeout(() => URL.revokeObjectURL(a.href), 4000);
                 }
-                try { localStorage.setItem(backupKey(), String(Date.now())); } catch (e) {}
-                refreshBackupInfo();
-                showToast(`✅ הגיבוי מוכן (${invoices.length} מסמכים)`, 'ok');
+                showToast(`✅ הקובץ מוכן (${payload.invoices.length} מסמכים)`, 'ok');
             } catch (e) {
-                if (e && e.name === 'AbortError') return;   // המשתמש סגר את חלון השיתוף
-                alert('שגיאה ביצירת הגיבוי: ' + (e && e.message ? e.message : ''));
+                if (e && e.name === 'AbortError') return;
+                alert('שגיאה ביצירת הקובץ: ' + (e && e.message ? e.message : ''));
             }
         };
-        function backupReminder() {
-            refreshBackupInfo();
-            let last = 0; try { last = Number(localStorage.getItem(backupKey())) || 0; } catch (e) {}
-            if (Date.now() - last > 30 * 86400000) showToast('💾 עבר יותר מחודש מהגיבוי האחרון - מומלץ לגבות (כרטיס "גיבוי נתונים").');
+
+        // ---- שחזור ----
+        async function restoreFromPayload(payload) {
+            if (!payload || payload.app !== 'invoices' || !Array.isArray(payload.invoices) || typeof payload.settings !== 'object') { alert('הקובץ אינו גיבוי תקין של האפליקציה.'); return; }
+            if (payload.restaurant && payload.restaurant !== RESTAURANT_ID) { alert(`הגיבוי שייך לעסק "${payload.restaurant}" ואתה מחובר לעסק "${RESTAURANT_ID}". השחזור נעצר.`); return; }
+            if (navigator.onLine === false) { alert('שחזור דורש חיבור לאינטרנט.'); return; }
+            const settingsIds = Object.keys(payload.settings).filter(BACKUP_SETTINGS_ALLOWED);
+            const when = payload.exportedAt ? new Date(payload.exportedAt).toLocaleString('he-IL', { dateStyle: 'short', timeStyle: 'short' }) : '';
+            const first = await appConfirm(`שחזור מגיבוי מ-${when}\n${payload.invoices.length} מסמכים, ${settingsIds.length} הגדרות (ספקים/מחירון/דוחות).\n\n"שחזר חסרים בלבד" - מחזיר רק מה שנמחק, ולא נוגע במה שקיים.`, { ok: 'שחזר חסרים בלבד', cancel: 'אפשרויות נוספות' });
+            let mode = 'missing';
+            if (!first) {
+                const second = await appConfirm('להחליף מסמכים קיימים באותם מזהים בגרסה מהגיבוי?\nשינויים שנעשו בהם אחרי הגיבוי יימחקו. מסמכים שלא בגיבוי לא יימחקו.\nלפני כן ייווצר גיבוי ביטחון אוטומטי.', { ok: 'החלף קיימים', cancel: 'ביטול' });
+                if (!second) return;
+                mode = 'overwrite';
+            }
+            if (!(await askAdminPassword())) return;
+            try {
+                showToast('⏳ משחזר...');
+                if (mode === 'overwrite') await createCloudBackup('pre-restore');
+                const [invSnap, setSnap] = await Promise.all([getDocs(getInvoicesCollection()), getDocs(getSettingsCollection())]);
+                const haveInv = new Set(), haveSet = new Set();
+                invSnap.forEach(d => haveInv.add(d.id)); setSnap.forEach(d => haveSet.add(d.id));
+                const ops = []; let nInv = 0, nSet = 0;
+                payload.invoices.forEach(inv => {
+                    if (!inv || !inv.id) return;
+                    if (mode === 'missing' && haveInv.has(inv.id)) return;
+                    ops.push([doc(getInvoicesCollection(), inv.id), inv]); nInv++;
+                });
+                for (const id of settingsIds) {
+                    let data = payload.settings[id];
+                    if (id === 'suppliers_list' && mode === 'missing' && haveSet.has(id)) {
+                        const cur = (await getDoc(getSettingsDoc(id))).data() || {};
+                        data = { ...cur, suppliers: Array.from(new Set([...(cur.suppliers || []), ...((data && data.suppliers) || [])])) };
+                    } else if (mode === 'missing' && haveSet.has(id)) continue;
+                    ops.push([getSettingsDoc(id), data]); nSet++;
+                }
+                await writeOps(ops, 100);
+                Object.keys(priceBookCache).forEach(k => delete priceBookCache[k]);
+                loadInvoicesForMonth();
+                await refreshBackupList();
+                showToast(`✅ שוחזרו ${nInv} מסמכים ו-${nSet} הגדרות`, 'ok');
+            } catch (e) { alert('שגיאה בשחזור: ' + (e && e.message ? e.message : '')); }
         }
-        window.addEventListener('load', () => setTimeout(backupReminder, 5000));
+
+        window.restoreCloudBackup = async function(i) {
+            const meta = (window.__backupList || [])[i];
+            if (!meta) return;
+            try { showToast('⏳ טוען גיבוי...'); await restoreFromPayload(await loadCloudBackup(meta)); }
+            catch (e) { alert('שגיאה בטעינת הגיבוי: ' + (e && e.message ? e.message : '')); }
+        };
+        window.restoreFromFile = async function(input) {
+            const file = input.files && input.files[0];
+            input.value = '';
+            if (!file) return;
+            let payload;
+            try { payload = JSON.parse(await file.text()); } catch (e) { alert('הקובץ אינו JSON תקין.'); return; }
+            await restoreFromPayload(payload);
+        };
+
+        // ---- גיבוי אוטומטי שבועי: רץ אחרי שהמנהל נכנס ----
+        (function autoBackupWatcher() {
+            let tries = 0;
+            const t = setInterval(async () => {
+                const mv = document.getElementById('mainView');
+                if (++tries > 300) { clearInterval(t); return; }
+                if (!mv || mv.classList.contains('hidden') || !RESTAURANT_ID) return;
+                clearInterval(t);
+                setTimeout(async () => {
+                    const list = await refreshBackupList();
+                    const last = list.length ? list[0].ts : 0;
+                    if (navigator.onLine !== false && Date.now() - last > AUTO_BACKUP_DAYS * 86400000) {
+                        try { await createCloudBackup('auto'); await refreshBackupList(); showToast('☁️ גיבוי שבועי אוטומטי נשמר'); }
+                        catch (e) { console.warn('גיבוי אוטומטי נכשל:', e); }
+                    }
+                }, 6000);
+            }, 2000);
+        })();
 
         initRestaurantId();

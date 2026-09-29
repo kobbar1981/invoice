@@ -229,8 +229,14 @@
         <!-- גיבוי -->
         <div class="card">
             <h3 style="margin-top:0;">💾 גיבוי נתונים</h3>
-            <button onclick="exportBackup()" style="background-color:#16a085;">ייצוא כל הנתונים (JSON)</button>
-            <div id="backupInfo" style="font-size:0.8em; color:#555; margin-top:4px;"></div>
+            <button onclick="cloudBackupNow()" style="background-color:#16a085;">☁️ גבה עכשיו לענן</button>
+            <div id="backupInfo" style="font-size:0.8em; color:#555; margin:4px 0 8px;"></div>
+            <div id="backupList"></div>
+            <div style="display:flex; gap:6px;">
+                <button onclick="exportBackup()" style="background-color:#7f8c8d; width:auto; flex:1;">📤 ייצוא לקובץ</button>
+                <button onclick="document.getElementById('backupFileInput').click()" style="background-color:#7f8c8d; width:auto; flex:1;">📥 שחזור מקובץ</button>
+            </div>
+            <input type="file" id="backupFileInput" accept=".json,application/json" class="hidden" onchange="restoreFromFile(this)">
         </div>
 
         <!-- טבלת חשבוניות גולמיות -->
