@@ -103,3 +103,12 @@ body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 8p
         .ch-labels { display: flex; gap: 6px; } .ch-labels span { flex: 1; text-align: center; font-size: 0.7em; color: #555; }
         .ch-hrow { margin: 6px 0; font-size: 0.85em; } .ch-hrow .track { background: #eef1f5; border-radius: 6px; height: 14px; overflow: hidden; } .ch-hrow .fill { background: #1877f2; height: 100%; }
         .ch-spark { border: 1px solid #e3e6ea; border-radius: 8px; padding: 6px; margin: 6px 0; font-size: 0.85em; }
+
+        /* כרטיסים מתקפלים */
+        .card.foldable > h3 { cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 0; user-select: none; -webkit-tap-highlight-color: transparent; }
+        .card.foldable > h3::after { content: '▾'; font-size: 0.9em; transition: transform 0.15s; flex-shrink: 0; }
+        .card.foldable.folded > h3::after { transform: rotate(90deg); }
+        .card.foldable > .card-body { margin-top: 10px; }
+        .card.foldable.folded > .card-body { display: none; }
+        .fold-tools { display: flex; gap: 6px; margin-bottom: 8px; }
+        .fold-tools button { margin-top: 0; padding: 6px 10px; background: #ecf0f1; color: #2c3e50; font-size: 0.85em; font-weight: normal; }
