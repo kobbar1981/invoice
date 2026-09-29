@@ -740,6 +740,8 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
             collect(monthlyNotes, 'תעודה');
             if (rows.length === 0) { card.classList.add('hidden'); list.innerHTML = ''; return; }
             rows.sort((a, b) => (b.pct || 0) - (a.pct || 0));
+            const alertsTitle = card.querySelector('h3');
+            if (alertsTitle) alertsTitle.textContent = `📈 שינויי מחיר החודש (${rows.length})`;   // המספר נראה גם כשהכרטיס מקופל
             list.innerHTML = `<table>
                 <thead><tr><th>ספק</th><th>פריט</th><th>מחיר קודם</th><th>מחיר חדש</th><th>שינוי</th><th>מקור</th></tr></thead>
                 <tbody>${rows.map(r => `<tr>

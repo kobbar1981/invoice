@@ -93,7 +93,7 @@
         var state = load();
         var cards = [];
         Array.prototype.forEach.call(main.children, function (card) {
-            if (!card.classList.contains('card') || card.id === 'priceAlertsCard') return;
+            if (!card.classList.contains('card')) return;
             var h = card.firstElementChild;
             if (!h || h.tagName !== 'H3') return;
             var key = h.textContent.trim().slice(0, 40);
