@@ -332,7 +332,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
             closeCameraModal();
             cameraPages.push(base64Data);
             if (cameraPages.length < MAX_SCAN_PAGES - (appendingToScan ? currentScanPages.length : 0) &&
-                await appConfirm(`צולם עמוד ${cameraPages.length}.\nלצלם עמוד נוסף באותו מסמך?\n(אישור = עוד עמוד, ביטול = סיום ועיבוד)`)) {
+                await appConfirm(`צולם עמוד ${cameraPages.length}`, { ok: 'הוסף עמוד', cancel: 'סיום עיבוד' })) {
                 await openCameraModal(cameraMode, true);
                 return;
             }
