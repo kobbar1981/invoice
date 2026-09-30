@@ -300,7 +300,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
         }
         function updateCameraTag() {
             const t = document.getElementById('cameraBuildTag');
-            if (t) t.textContent = 'build: 2026-09-30-cam-rotate2 | סיבוב: ' + cameraAngle + '°';
+            if (t) t.textContent = 'build: 2026-09-30-cam-rotate3 | סיבוב: ' + cameraAngle + '°';
         }
         function ensureCameraRotateButton(overlay, video) {
             if (!document.getElementById('cameraBuildTag')) {
@@ -380,14 +380,11 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
             const scale = Math.min(1, 2000 / Math.max(video.videoWidth, video.videoHeight));
             const srcW = Math.round(video.videoWidth * scale), srcH = Math.round(video.videoHeight * scale);
             const ctx = canvas.getContext('2d');
-            const sideways = (cameraAngle % 180 !== 0);
-            canvas.width = sideways ? srcH : srcW;
-            canvas.height = sideways ? srcW : srcH;
+            // הסיבוב הוא לתצוגה בלבד — הצילום נשמר כפי שהוא, בלי לסובב
+            canvas.width = srcW;
+            canvas.height = srcH;
             ctx.setTransform(1, 0, 0, 1, 0, 0);
-            ctx.translate(canvas.width / 2, canvas.height / 2);
-            ctx.rotate(cameraAngle * Math.PI / 180);
-            ctx.drawImage(video, -srcW / 2, -srcH / 2, srcW, srcH);
-            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.drawImage(video, 0, 0, srcW, srcH);
             const base64Data = canvas.toDataURL('image/jpeg', 0.9).split(',')[1];
             closeCameraModal();
             cameraPages.push(base64Data);
