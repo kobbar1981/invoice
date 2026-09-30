@@ -331,8 +331,10 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
             const base64Data = canvas.toDataURL('image/jpeg', 0.9).split(',')[1];
             closeCameraModal();
             cameraPages.push(base64Data);
-            if (cameraPages.length < MAX_SCAN_PAGES - (appendingToScan ? currentScanPages.length : 0) &&
-                await appConfirm(`צולם עמוד ${cameraPages.length}`, { ok: 'הוסף עמוד', cancel: 'סיום עיבוד' })) {
+            const canAddPage = cameraPages.length < MAX_SCAN_PAGES - (appendingToScan ? currentScanPages.length : 0);
+            // אישור (ימין) = סיום עיבוד, ביטול (שמאל) = הוסף עמוד
+            const finishNow = !canAddPage || await appConfirm(`צולם עמוד ${cameraPages.length}`, { ok: 'סיום עיבוד', cancel: 'הוסף עמוד' });
+            if (!finishNow) {
                 await openCameraModal(cameraMode, true);
                 return;
             }
