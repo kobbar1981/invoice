@@ -265,6 +265,28 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
         // ---- מודאל מצלמה חיה (getUserMedia) ----
         let cameraStream = null;
 
+        let cameraRotated = false;   // הזרם מגיע לרוחב בעוד המסך לאורך -> מסובבים 90° בתצוגה ובצילום
+        async function fitCameraPreview(video) {
+            if (!video.videoWidth) {
+                await new Promise(r => { video.onloadedmetadata = r; setTimeout(r, 1500); });
+            }
+            const vw = video.videoWidth, vh = video.videoHeight;
+            const portraitScreen = window.innerHeight >= window.innerWidth;
+            cameraRotated = Boolean(vw && vh && portraitScreen && vw > vh);
+            if (!cameraRotated) return;
+            const boxW = window.innerWidth, boxH = window.innerHeight * 0.75, a = vw / vh;
+            const dispW = Math.min(boxW, boxH / a), dispH = dispW * a;
+            video.style.maxHeight = 'none';
+            video.style.width = dispH + 'px';
+            video.style.height = dispW + 'px';
+            video.style.margin = ((dispH - dispW) / 2) + 'px 0';
+            video.style.transform = 'rotate(90deg)';
+        }
+        function resetCameraPreview(video) {
+            cameraRotated = false;
+            video.style.maxHeight = video.style.width = video.style.height = video.style.margin = video.style.transform = '';
+        }
+
         window.openCameraModal = async function(mode, keepPages, append) {
             cameraMode = (mode === 'delivery') ? 'delivery' : 'invoice';
             scanMode = cameraMode;
@@ -288,6 +310,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
                 video.onplaying = () => { video.style.opacity = '1'; };
                 video.srcObject = cameraStream;
                 try { await video.play(); } catch (e) { /* autoplay מטפל בזה */ }
+                await fitCameraPreview(video);
             } catch (err) {
                 errorBox.innerText = "לא ניתן לפתוח את המצלמה: " + err.message + " (ודא שהאפליקציה קיבלה הרשאת מצלמה)";
                 errorBox.classList.remove('hidden');
@@ -304,6 +327,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
             }
             video.srcObject = null;
             video.style.opacity = '0';
+            resetCameraPreview(video);
         };
 
         window.capturePhotoFromCamera = async function() {
@@ -315,9 +339,19 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
             }
             // כיווץ בזמן הצילום: מקסימום 2000 פיקסלים בצד הארוך, איכות 90%
             const scale = Math.min(1, 2000 / Math.max(video.videoWidth, video.videoHeight));
-            canvas.width = Math.round(video.videoWidth * scale);
-            canvas.height = Math.round(video.videoHeight * scale);
-            canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+            const srcW = Math.round(video.videoWidth * scale), srcH = Math.round(video.videoHeight * scale);
+            const ctx = canvas.getContext('2d');
+            if (cameraRotated) {
+                canvas.width = srcH; canvas.height = srcW;
+                ctx.setTransform(1, 0, 0, 1, 0, 0);
+                ctx.translate(canvas.width, 0);
+                ctx.rotate(Math.PI / 2);
+                ctx.drawImage(video, 0, 0, srcW, srcH);
+                ctx.setTransform(1, 0, 0, 1, 0, 0);
+            } else {
+                canvas.width = srcW; canvas.height = srcH;
+                ctx.drawImage(video, 0, 0, srcW, srcH);
+            }
             const base64Data = canvas.toDataURL('image/jpeg', 0.9).split(',')[1];
             closeCameraModal();
             cameraPages.push(base64Data);
