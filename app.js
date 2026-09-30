@@ -591,6 +591,27 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
                 </div>`).join('');
         }
 
+        // ספק שנקרא מהמסמך ואינו ברשימה: שואלים אם להוסיף אותו ולבחור בו (אפשר לתקן את השם לפני ההוספה)
+        async function offerAddNewSupplier(rawName) {
+            const raw = String(rawName || '').trim();
+            if (!raw) return;
+            const name = await appPrompt('ספק חדש שלא ברשימה.\nלהוסיף אותו ולבחור בו? אפשר לתקן את השם:', raw, { ok: 'הוסף ובחר', cancel: 'לא, אבחר ידנית' });
+            if (name === null) return;
+            const clean = name.trim();
+            if (!clean) return;
+            if (lastRecognizedSupplierRaw !== raw) return;   // בינתיים נפתח מסמך אחר - לא נוגעים
+            if (!suppliersList.includes(clean)) {
+                suppliersList.push(clean);
+                try { await ackOrQueue(setDoc(getSettingsDoc("suppliers_list"), { suppliers: suppliersList }), 8000, "רשימת ספקים"); }
+                catch (e) { alert("שגיאה בהוספת הספק."); return; }
+            }
+            renderSupplierSelect();
+            const sel = document.getElementById('invoiceSupplierSelect');
+            if (sel) sel.value = clean;
+            const hint = document.getElementById('supplierMatchHint');
+            if (hint) { hint.style.color = '#16a085'; hint.innerText = '✓ הספק נוסף לרשימה ונבחר'; }
+        }
+
         window.addSupplierToList = async function() {
             const input = document.getElementById('newSupplierNameInput');
             const name = (input.value || '').trim();
@@ -1795,6 +1816,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
                             ? `לא זוהה ספק ברשימה (נקרא: "${lastRecognizedSupplierRaw}"). בחר ספק - המערכת תזכור לפעם הבאה.`
                             : 'לא זוהה ספק. בחר ספק ידנית.';
                     }
+                    if (lastRecognizedSupplierRaw.trim()) setTimeout(() => offerAddNewSupplier(lastRecognizedSupplierRaw), 300);
                 }
                 notesInput.value = '';
 

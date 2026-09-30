@@ -90,7 +90,6 @@
         var main = document.getElementById('mainView');
         if (!main || main.dataset.foldInit) return;
         main.dataset.foldInit = '1';
-        var state = load();
         var cards = [];
         Array.prototype.forEach.call(main.children, function (card) {
             if (!card.classList.contains('card')) return;
@@ -102,12 +101,10 @@
             while (h.nextSibling) body.appendChild(h.nextSibling);
             card.appendChild(body);
             card.classList.add('foldable');
-            // ברירת מחדל: מקופל. אם המשתמש פתח פעם - זוכרים
-            if (state[key] !== 'open') card.classList.add('folded');
+            card.classList.add('folded');   // בכל פתיחה של האפליקציה הכול מקופל
             h.setAttribute('role', 'button');
             h.addEventListener('click', function () {
-                var folded = card.classList.toggle('folded');
-                var st = load(); st[key] = folded ? 'closed' : 'open'; save(st);
+                card.classList.toggle('folded');
             });
             cards.push({ card: card, key: key });
         });
@@ -115,9 +112,7 @@
         var tools = document.createElement('div');
         tools.className = 'fold-tools';
         function setAll(fold) {
-            var st = load();
-            cards.forEach(function (c) { c.card.classList.toggle('folded', fold); st[c.key] = fold ? 'closed' : 'open'; });
-            save(st);
+            cards.forEach(function (c) { c.card.classList.toggle('folded', fold); });
         }
         var b1 = document.createElement('button'); b1.textContent = '⬇ פתח הכול'; b1.onclick = function () { setAll(false); };
         var b2 = document.createElement('button'); b2.textContent = '⬆ סגור הכול'; b2.onclick = function () { setAll(true); };
