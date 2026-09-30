@@ -278,6 +278,8 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
                 alert("הדפדפן/האפליקציה לא תומכים בגישה למצלמה. נסה להעלות תמונה במקום זאת.");
                 return;
             }
+            // מילוי המסך לאורך — inline כדי שיעבוד גם אם app.css ישן/במטמון
+            Object.assign(video.style, { width: '100%', height: 'auto', maxHeight: 'none', flex: '1 1 auto', minHeight: '0', objectFit: 'cover', background: '#000' });
             video.style.opacity = '0';
             overlay.classList.remove('hidden');
             try {
