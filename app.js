@@ -311,6 +311,15 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
                 video.srcObject = cameraStream;
                 try { await video.play(); } catch (e) { /* autoplay מטפל בזה */ }
                 await fitCameraPreview(video);
+                if (!document.getElementById('cameraBuildTag')) {
+                    const t = document.createElement('div');
+                    t.id = 'cameraBuildTag';
+                    t.style.cssText = 'color:#888; font-size:11px; direction:ltr;';
+                    t.textContent = 'build: 2026-09-30-cam-rotate' + (cameraRotated ? ' (rotated)' : '');
+                    overlay.appendChild(t);
+                } else {
+                    document.getElementById('cameraBuildTag').textContent = 'build: 2026-09-30-cam-rotate' + (cameraRotated ? ' (rotated)' : '');
+                }
             } catch (err) {
                 errorBox.innerText = "לא ניתן לפתוח את המצלמה: " + err.message + " (ודא שהאפליקציה קיבלה הרשאת מצלמה)";
                 errorBox.classList.remove('hidden');
