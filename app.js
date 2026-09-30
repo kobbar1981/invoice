@@ -265,66 +265,6 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
         // ---- מודאל מצלמה חיה (getUserMedia) ----
         let cameraStream = null;
 
-        let cameraAngle = 0;   // סיבוב תצוגה/צילום במעלות (0/90/180/270). ברירת מחדל אוטומטית, ואפשר לשנות בכפתור "סובב"
-        function cameraAutoAngle(video) {
-            const portraitScreen = window.innerHeight >= window.innerWidth;
-            return (video.videoWidth && video.videoHeight && portraitScreen && video.videoWidth > video.videoHeight) ? 90 : 0;
-        }
-        function applyCameraAngle(video) {
-            const vw = video.videoWidth, vh = video.videoHeight;
-            video.style.maxHeight = video.style.width = video.style.height = video.style.margin = video.style.transform = '';
-            if (!vw || !vh || cameraAngle === 0) return;
-            const a = vw / vh;
-            if (cameraAngle % 180 === 0) { video.style.transform = 'rotate(' + cameraAngle + 'deg)'; return; }
-            const boxW = window.innerWidth, boxH = window.innerHeight * 0.75;
-            const dispW = Math.min(boxW, boxH / a), dispH = dispW * a;
-            video.style.maxHeight = 'none';
-            video.style.width = dispH + 'px';
-            video.style.height = dispW + 'px';
-            video.style.margin = ((dispH - dispW) / 2) + 'px 0';
-            video.style.transform = 'rotate(' + cameraAngle + 'deg)';
-        }
-        async function fitCameraPreview(video) {
-            if (!video.videoWidth) {
-                await new Promise(r => { video.onloadedmetadata = r; setTimeout(r, 1500); });
-            }
-            let saved = null;
-            try { saved = localStorage.getItem('cam_angle_override'); } catch (e) {}
-            cameraAngle = (saved !== null && saved !== '') ? (parseInt(saved, 10) || 0) : cameraAutoAngle(video);
-            applyCameraAngle(video);
-            updateCameraTag();
-        }
-        function resetCameraPreview(video) {
-            cameraAngle = 0;
-            video.style.maxHeight = video.style.width = video.style.height = video.style.margin = video.style.transform = '';
-        }
-        function updateCameraTag() {
-            const t = document.getElementById('cameraBuildTag');
-            if (t) t.textContent = 'build: 2026-09-30-cam-rotate3 | סיבוב: ' + cameraAngle + '°';
-        }
-        function ensureCameraRotateButton(overlay, video) {
-            if (!document.getElementById('cameraBuildTag')) {
-                const t = document.createElement('div');
-                t.id = 'cameraBuildTag';
-                t.style.cssText = 'color:#888; font-size:11px; direction:ltr; margin-top:4px;';
-                overlay.appendChild(t);
-            }
-            if (!document.getElementById('cameraRotateBtn')) {
-                const b = document.createElement('button');
-                b.id = 'cameraRotateBtn';
-                b.type = 'button';
-                b.textContent = '🔄 סובב תצוגה';
-                b.style.cssText = 'margin-top:6px; padding:8px 14px; background:#34495e; color:#fff; border:none; border-radius:8px; font-size:0.9em;';
-                b.onclick = function () {
-                    cameraAngle = (cameraAngle + 90) % 360;
-                    try { localStorage.setItem('cam_angle_override', String(cameraAngle)); } catch (e) {}
-                    applyCameraAngle(document.getElementById('cameraModalVideo'));
-                    updateCameraTag();
-                };
-                overlay.appendChild(b);
-            }
-        }
-
         window.openCameraModal = async function(mode, keepPages, append) {
             cameraMode = (mode === 'delivery') ? 'delivery' : 'invoice';
             scanMode = cameraMode;
@@ -342,14 +282,12 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
             overlay.classList.remove('hidden');
             try {
                 cameraStream = await navigator.mediaDevices.getUserMedia({
-                    video: { facingMode: { ideal: "environment" }, width: { ideal: (window.innerHeight >= window.innerWidth) ? 1080 : 1920 }, height: { ideal: (window.innerHeight >= window.innerWidth) ? 1920 : 1080 } },
+                    video: { facingMode: { ideal: "environment" }, aspectRatio: { ideal: (window.innerHeight >= window.innerWidth) ? 9 / 16 : 16 / 9 }, width: { ideal: (window.innerHeight >= window.innerWidth) ? 1080 : 1920 }, height: { ideal: (window.innerHeight >= window.innerWidth) ? 1920 : 1080 } },
                     audio: false
                 });
                 video.onplaying = () => { video.style.opacity = '1'; };
                 video.srcObject = cameraStream;
                 try { await video.play(); } catch (e) { /* autoplay מטפל בזה */ }
-                ensureCameraRotateButton(overlay, video);
-                await fitCameraPreview(video);
             } catch (err) {
                 errorBox.innerText = "לא ניתן לפתוח את המצלמה: " + err.message + " (ודא שהאפליקציה קיבלה הרשאת מצלמה)";
                 errorBox.classList.remove('hidden');
@@ -366,7 +304,6 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
             }
             video.srcObject = null;
             video.style.opacity = '0';
-            resetCameraPreview(video);
         };
 
         window.capturePhotoFromCamera = async function() {
@@ -376,15 +313,19 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
                 alert("המצלמה עדיין לא מוכנה, נסה שוב עוד רגע.");
                 return;
             }
-            // כיווץ בזמן הצילום: מקסימום 2000 פיקסלים בצד הארוך, איכות 90%
-            const scale = Math.min(1, 2000 / Math.max(video.videoWidth, video.videoHeight));
-            const srcW = Math.round(video.videoWidth * scale), srcH = Math.round(video.videoHeight * scale);
+            // הצילום = בדיוק מה שנראה במסך (חיתוך לאורך, כמו object-fit: cover), בלי סיבוב.
+            // כיווץ: מקסימום 2000 פיקסלים בצד הארוך, איכות 90%
+            const vw = video.videoWidth, vh = video.videoHeight;
+            const bw = video.clientWidth || vw, bh = video.clientHeight || vh;
+            const fit = Math.max(bw / vw, bh / vh);
+            const sw = bw / fit, sh = bh / fit;
+            const sx = (vw - sw) / 2, sy = (vh - sh) / 2;
+            const out = Math.min(1, 2000 / Math.max(sw, sh));
+            canvas.width = Math.round(sw * out);
+            canvas.height = Math.round(sh * out);
             const ctx = canvas.getContext('2d');
-            // הסיבוב הוא לתצוגה בלבד — הצילום נשמר כפי שהוא, בלי לסובב
-            canvas.width = srcW;
-            canvas.height = srcH;
             ctx.setTransform(1, 0, 0, 1, 0, 0);
-            ctx.drawImage(video, 0, 0, srcW, srcH);
+            ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
             const base64Data = canvas.toDataURL('image/jpeg', 0.9).split(',')[1];
             closeCameraModal();
             cameraPages.push(base64Data);
