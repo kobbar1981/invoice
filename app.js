@@ -862,6 +862,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
                 }
             }
             await learnSupplierAlias(supplier);
+            const scanMetaAtSave = currentScanMeta;
 
             const noteNumber = document.getElementById('invoiceNumberInput').value.trim();
             const noteDate = (document.getElementById('invoiceDateInput').value || '').trim();
@@ -938,6 +939,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
                 handwrittenNotesList = [];
                 editingInvoiceId = null;
                 scanMode = 'invoice';
+                if (!isUpdate) learnDateChoice(supplier, noteDate, scanMetaAtSave);
                 alert(isUpdate ? (editingOriginalKind === 'invoice' ? "החשבונית הומרה לתעודת משלוח בהצלחה!" : "התעודה עודכנה בהצלחה!") : "התעודה נשמרה בהצלחה!");
                 if (monthKey !== selectedMonth) {
                     const monthEl = document.getElementById('invoiceMonthSelect');
@@ -1422,12 +1424,51 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
         }
 
         // משווה קריאת עמוד מלא מול קריאת כותרת מוגדלת. כשיש אי-התאמה - מסמן ומציע את שתי האפשרויות
+        // ---- למידת העדפת תאריך לכל ספק: כששתי הקריאות חלוקות, זוכרים איזו מהן נבחרה ----
+        let dateReadPrefs = null;   // { שם ספק: { header: n, full: n } }
+        async function ensureDatePrefs() {
+            if (dateReadPrefs !== null) return;
+            try {
+                const snap = await getDoc(getSettingsDoc('date_read_prefs'));
+                dateReadPrefs = (snap.exists() && snap.data().suppliers) || {};
+            } catch (e) { dateReadPrefs = {}; }
+        }
+        // מחזיר 'full' / 'header' רק אם יש העדפה ברורה (לפחות 3 בחירות ויתרון של 2); אחרת '' = ברירת המחדל (כותרת)
+        function preferredDateSource(supplier) {
+            const p = supplier && dateReadPrefs && dateReadPrefs[supplier];
+            if (!p) return '';
+            const h = p.header || 0, f = p.full || 0;
+            if (f >= 3 && f - h >= 2) return 'full';
+            if (h >= 3 && h - f >= 2) return 'header';
+            return '';
+        }
+        async function learnDateChoice(supplier, finalDate, meta) {
+            try {
+                if (!meta || !meta.dateConflict || !supplier || !finalDate) return;
+                let src = null;
+                if (finalDate === meta.dateFull) src = 'full';
+                else if (finalDate === meta.dateHdr) src = 'header';
+                if (!src) return;   // תיקון ידני לתאריך שלישי - לא לומדים ממנו
+                await ensureDatePrefs();
+                const cur = dateReadPrefs[supplier] || { header: 0, full: 0 };
+                cur[src] = (cur[src] || 0) + 1;
+                if ((cur.header || 0) + (cur.full || 0) > 20) { cur.header = Math.round((cur.header || 0) / 2); cur.full = Math.round((cur.full || 0) / 2); }
+                dateReadPrefs[supplier] = cur;
+                await ackOrQueue(setDoc(getSettingsDoc('date_read_prefs'), { suppliers: dateReadPrefs }), 8000, 'העדפת תאריך');
+            } catch (e) { console.warn('שמירת העדפת תאריך נכשלה:', e); }
+        }
+
         function reconcileHeader(parsed, hdr) {
             const meta = { dateConflict: false, dateAlt: '', numberConflict: false, numberAlt: '', typeConflict: false };
             if (!hdr) return meta;
             const dA = isValidIsoDate(parsed.invoiceDate) ? parsed.invoiceDate : '';
             const dB = isValidIsoDate(hdr.invoiceDate) ? hdr.invoiceDate : '';
-            if (dA && dB && dA !== dB) { meta.dateConflict = true; meta.dateAlt = dA; parsed.invoiceDate = dB; }
+            if (dA && dB && dA !== dB) {
+                meta.dateConflict = true; meta.dateFull = dA; meta.dateHdr = dB;
+                const supKey = matchSupplier(parsed.supplier || hdr.supplier, parsed.taxId || hdr.taxId);
+                if (preferredDateSource(supKey) === 'full') { meta.dateAlt = dB; parsed.invoiceDate = dA; meta.datePrefApplied = true; }
+                else { meta.dateAlt = dA; parsed.invoiceDate = dB; if (preferredDateSource(supKey) === 'header') meta.datePrefApplied = true; }
+            }
             else if (!dA && dB) parsed.invoiceDate = dB;
             const nA = String(parsed.invoiceNumber || '').trim();
             const nB = String(hdr.invoiceNumber || '').trim();
@@ -1461,7 +1502,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
             const sugg = [];
             const meta = currentScanMeta || {};
             if (meta.dateConflict && meta.dateAlt && meta.dateAlt !== v) {
-                msgs.push('שתי קריאות של המסמך נתנו תאריכים שונים - בדוק מול התמונה.');
+                msgs.push('שתי קריאות של המסמך נתנו תאריכים שונים - בדוק מול התמונה.' + (meta.datePrefApplied ? ' (נבחרה הקריאה שבחרת בדרך כלל אצל ספק זה)' : ''));
                 sugg.push(meta.dateAlt);
             }
             const prob = dateProblem(v);
@@ -1632,6 +1673,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
                 // קריאה שנייה של כותרת העמוד הראשון (מוגדלת) - לאימות סוג מסמך, מספר ותאריך
                 const hdrParsed = await hdrPromise;
 
+                await ensureDatePrefs();
                 const meta = reconcileHeader(parsed, hdrParsed);
                 meta.handwritingField = Array.isArray(parsed.handwrittenNotes);
                 let det = detectDocType(parsed);
@@ -1855,6 +1897,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
                 }
             }
             await learnSupplierAlias(supplier);
+            const scanMetaAtSave = currentScanMeta;
 
             const invoiceNumber = document.getElementById('invoiceNumberInput').value.trim();
             const amount = parseFloat(document.getElementById('invoiceAmountInput').value);
@@ -1949,6 +1992,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
                 recognizedItemsList = [];
                 handwrittenNotesList = [];
                 editingInvoiceId = null;
+                if (!isUpdate) learnDateChoice(supplier, invoiceDate, scanMetaAtSave);
                 alert(isUpdate ? (editingOriginalKind === 'delivery' ? "התעודה הומרה לחשבונית בהצלחה!" : "החשבונית עודכנה בהצלחה!") : "החשבונית נשמרה בהצלחה!");
                 if (monthKey !== selectedMonth) {
                     const monthEl = document.getElementById('invoiceMonthSelect');
@@ -2470,7 +2514,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
         const BACKUP_KEEP = 10;              // כמה גיבויים שומרים (הישנים נמחקים)
         const BACKUP_CHUNK = 300000;         // גודל חתיכה במסמך (מסמך Firestore מוגבל ל-1MB)
         const AUTO_BACKUP_DAYS = 7;
-        const BACKUP_SETTINGS_ALLOWED = id => id === 'suppliers_list' || id === 'supplier_aliases' || id.startsWith('price_book_') || id.startsWith('report_edits');
+        const BACKUP_SETTINGS_ALLOWED = id => id === 'suppliers_list' || id === 'supplier_aliases' || id === 'date_read_prefs' || id.startsWith('price_book_') || id.startsWith('report_edits');
         const backupDocId = ts => `backup_${ts}`;
 
         async function buildBackupPayload() {
