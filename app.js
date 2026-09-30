@@ -1600,15 +1600,29 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
                 recognizedPageCount = pages.length;
                 recognizedImageBase64 = await buildScanPreview(pages);
 
-                const results = [];
-                for (let i = 0; i < pages.length; i++) {
-                    if (pages.length > 1) recognizingEl.innerText = `⏳ מעבד עמוד ${i + 1} מתוך ${pages.length}...`;
-                    try {
-                        results.push(await recognizeOnePage(pages[i]));
-                    } catch (err) {
-                        throw (pages.length > 1) ? new Error(`עמוד ${i + 1}: ${err.message}`) : err;
+                // קריאת הכותרת (תאריך/מספר מסמך) רצה במקביל לקריאת העמודים - במקום אחריהם
+                const hdrPromise = (async () => {
+                    try { return await recognizeOnePage(await cropPageHeader(pages[0]), { headerOnly: true }); }
+                    catch (e) { console.warn('קריאת כותרת שנייה נכשלה:', e); return null; }
+                })();
+
+                // עמודים במקביל (עד 3 בו-זמנית), התוצאות נשמרות לפי סדר העמודים
+                const results = new Array(pages.length);
+                let nextIdx = 0, doneCount = 0;
+                if (pages.length > 1) recognizingEl.innerText = `⏳ מעבד ${pages.length} עמודים...`;
+                const worker = async () => {
+                    while (nextIdx < pages.length) {
+                        const i = nextIdx++;
+                        try {
+                            results[i] = await recognizeOnePage(pages[i]);
+                        } catch (err) {
+                            throw (pages.length > 1) ? new Error(`עמוד ${i + 1}: ${err.message}`) : err;
+                        }
+                        doneCount++;
+                        if (pages.length > 1 && doneCount < pages.length) recognizingEl.innerText = `⏳ עובד... ${doneCount}/${pages.length} עמודים`;
                     }
-                }
+                };
+                await Promise.all(Array.from({ length: Math.min(3, pages.length) }, worker));
 
                 const parsed = (pages.length === 1) ? results[0] : mergePageResults(results);
                 if (parsed.isCredit && parsed.amount > 0) {
@@ -1616,11 +1630,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
                 }
 
                 // קריאה שנייה של כותרת העמוד הראשון (מוגדלת) - לאימות סוג מסמך, מספר ותאריך
-                let hdrParsed = null;
-                try {
-                    recognizingEl.innerText = '⏳ בודק שוב תאריך ומספר מסמך...';
-                    hdrParsed = await recognizeOnePage(await cropPageHeader(pages[0]), { headerOnly: true });
-                } catch (e) { console.warn('קריאת כותרת שנייה נכשלה:', e); }
+                const hdrParsed = await hdrPromise;
 
                 const meta = reconcileHeader(parsed, hdrParsed);
                 meta.handwritingField = Array.isArray(parsed.handwrittenNotes);
