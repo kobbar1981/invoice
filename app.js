@@ -282,7 +282,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
             overlay.classList.remove('hidden');
             try {
                 cameraStream = await navigator.mediaDevices.getUserMedia({
-                    video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1920 } },
+                    video: { facingMode: { ideal: "environment" }, width: { ideal: (window.innerHeight >= window.innerWidth) ? 1080 : 1920 }, height: { ideal: (window.innerHeight >= window.innerWidth) ? 1920 : 1080 } },
                     audio: false
                 });
                 video.onplaying = () => { video.style.opacity = '1'; };
