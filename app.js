@@ -491,8 +491,6 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
 
             const fileInput = document.getElementById('fileUploadInput');
             if (fileInput) fileInput.addEventListener('change', (e) => handleScanFiles(e, 'invoice'));
-            const nativeCamInput = document.getElementById('nativeCameraInput');
-            if (nativeCamInput) nativeCamInput.addEventListener('change', (e) => handleScanFiles(e, 'invoice'));
             const deliveryInput = document.getElementById('deliveryFileInput');
             if (deliveryInput) deliveryInput.addEventListener('change', (e) => handleScanFiles(e, 'delivery'));
             const addPageInput = document.getElementById('addPageFileInput');
