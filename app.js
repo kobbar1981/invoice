@@ -284,9 +284,15 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
             overlay.classList.remove('hidden');
             try {
                 cameraStream = await navigator.mediaDevices.getUserMedia({
-                    video: { facingMode: { ideal: "environment" }, aspectRatio: { ideal: (window.innerHeight >= window.innerWidth) ? 9 / 16 : 16 / 9 }, width: { ideal: (window.innerHeight >= window.innerWidth) ? 1080 : 1920 }, height: { ideal: (window.innerHeight >= window.innerWidth) ? 1920 : 1080 } },
+                    video: { facingMode: { ideal: "environment" }, aspectRatio: { ideal: (window.innerHeight >= window.innerWidth) ? 3 / 4 : 4 / 3 }, width: { ideal: (window.innerHeight >= window.innerWidth) ? 1536 : 2048 }, height: { ideal: (window.innerHeight >= window.innerWidth) ? 2048 : 1536 } },
                     audio: false
                 });
+                // זום מינימלי (אם המכשיר תומך, לפעמים זה עדשה רחבה) — כדי שלא יהיה צורך להתרחק
+                try {
+                    const trk = cameraStream.getVideoTracks()[0];
+                    const caps = trk.getCapabilities ? trk.getCapabilities() : {};
+                    if (caps.zoom && typeof caps.zoom.min === 'number') await trk.applyConstraints({ advanced: [{ zoom: caps.zoom.min }] });
+                } catch (e) { /* לא קריטי */ }
                 video.onplaying = () => { video.style.opacity = '1'; };
                 video.srcObject = cameraStream;
                 try { await video.play(); } catch (e) { /* autoplay מטפל בזה */ }
