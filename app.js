@@ -265,6 +265,39 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
         // ---- מודאל מצלמה חיה (getUserMedia) ----
         let cameraStream = null;
 
+        
+        // פותח מצלמה ומנסה לקבל פריים לאורך (גובה > רוחב) כשהמסך לאורך — אחרת המצלמה נותנת פריים לרוחב עם פסים שחורים
+        async function openPortraitStream() {
+            const portrait = window.innerHeight >= window.innerWidth;
+            const env = { ideal: "environment" };
+            const attempts = portrait ? [
+                { facingMode: env, width: { ideal: 1536 }, height: { ideal: 2048 }, aspectRatio: { exact: 3 / 4 } },
+                { facingMode: env, width: { ideal: 1080 }, height: { ideal: 1440 }, aspectRatio: { ideal: 3 / 4 } },
+                { facingMode: env, width: { ideal: 2048 }, height: { ideal: 1536 }, aspectRatio: { ideal: 3 / 4 } },
+                { facingMode: env, width: { ideal: 1080 }, height: { ideal: 1920 } },
+                { facingMode: env, aspectRatio: { ideal: 3 / 4 } }
+            ] : [
+                { facingMode: env, width: { ideal: 2048 }, height: { ideal: 1536 }, aspectRatio: { ideal: 4 / 3 } }
+            ];
+            let fallback = null;
+            for (const v of attempts) {
+                let s;
+                try { s = await navigator.mediaDevices.getUserMedia({ video: v, audio: false }); } catch (e) { continue; }
+                const st = s.getVideoTracks()[0].getSettings ? s.getVideoTracks()[0].getSettings() : {};
+                const isPortraitFrame = st.width && st.height ? st.height > st.width : true;
+                if (!portrait || isPortraitFrame) {
+                    if (fallback) fallback.getTracks().forEach(t => t.stop());
+                    return s;
+                }
+                if (fallback) fallback.getTracks().forEach(t => t.stop());
+                fallback = s;
+                // משחררים את המצלמה כדי שהניסיון הבא יוכל לפתוח מחדש
+                s.getTracks().forEach(t => t.stop());
+                fallback = null;
+            }
+            return await navigator.mediaDevices.getUserMedia({ video: { facingMode: env }, audio: false });
+        }
+
         window.openCameraModal = async function(mode, keepPages, append) {
             cameraMode = (mode === 'delivery') ? 'delivery' : 'invoice';
             scanMode = cameraMode;
@@ -279,14 +312,11 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
                 return;
             }
             // מילוי המסך לאורך — inline כדי שיעבוד גם אם app.css ישן/במטמון
-            Object.assign(video.style, { width: '100%', height: 'auto', maxHeight: 'none', flex: '1 1 auto', minHeight: '0', objectFit: 'cover', background: '#000' });
+            Object.assign(video.style, { width: '100%', height: 'auto', maxHeight: 'none', flex: '1 1 auto', minHeight: '0', objectFit: 'contain', background: '#000' });
             video.style.opacity = '0';
             overlay.classList.remove('hidden');
             try {
-                cameraStream = await navigator.mediaDevices.getUserMedia({
-                    video: { facingMode: { ideal: "environment" }, aspectRatio: { ideal: window.innerWidth / window.innerHeight }, width: { ideal: (window.innerHeight >= window.innerWidth) ? 1440 : 2560 }, height: { ideal: (window.innerHeight >= window.innerWidth) ? 2560 : 1440 } },
-                    audio: false
-                });
+                cameraStream = await openPortraitStream();
                 // זום מינימלי (אם המכשיר תומך, לפעמים זה עדשה רחבה) — כדי שלא יהיה צורך להתרחק
                 try {
                     const trk = cameraStream.getVideoTracks()[0];
@@ -446,17 +476,43 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
             // הצילום = כל הפריים שהמצלמה מחזירה (בלי חיתוך צדדים), בלי סיבוב.
             // כיווץ: מקסימום 2000 פיקסלים בצד הארוך, איכות 90%
             const vw = video.videoWidth, vh = video.videoHeight;
-            // מצלמים בדיוק את מה שרואים על המסך (object-fit: cover) — מה שרואים = מה שמצולם
-            const dw = video.clientWidth || vw, dh = video.clientHeight || vh;
-            const cs = Math.max(dw / vw, dh / vh);
-            const sw = Math.min(vw, Math.round(dw / cs)), sh = Math.min(vh, Math.round(dh / cs));
-            const sx = Math.round((vw - sw) / 2), sy = Math.round((vh - sh) / 2);
-            const out = Math.min(1, 2000 / Math.max(sw, sh));
-            canvas.width = Math.round(sw * out);
-            canvas.height = Math.round(sh * out);
             const ctx = canvas.getContext('2d');
             ctx.setTransform(1, 0, 0, 1, 0, 0);
-            ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+            let drawn = false;
+            // ניסיון 1: תמונה סטילס ברזולוציה מלאה מהחיישן (ImageCapture.takePhoto) — כיוון נכון, בלי פסים
+            try {
+                const track = cameraStream && cameraStream.getVideoTracks()[0];
+                if (track && typeof window.ImageCapture === 'function') {
+                    const ic = new ImageCapture(track);
+                    let opts = {};
+                    try {
+                        const pc = await ic.getPhotoCapabilities();
+                        if (pc && pc.imageWidth && pc.imageHeight) opts = { imageWidth: pc.imageWidth.max, imageHeight: pc.imageHeight.max };
+                    } catch (e) { /* לא קריטי */ }
+                    const blob = await ic.takePhoto(opts);
+                    const bmp = await createImageBitmap(blob, { imageOrientation: 'from-image' });
+                    // אם התצוגה לאורך והתמונה יצאה לרוחב (או להפך) — כנראה כיוון שגוי, נשתמש בפריים הווידאו
+                    const sameOrientation = (bmp.height >= bmp.width) === (vh >= vw);
+                    if (sameOrientation || vh === vw) {
+                        const o = Math.min(1, 2000 / Math.max(bmp.width, bmp.height));
+                        canvas.width = Math.round(bmp.width * o);
+                        canvas.height = Math.round(bmp.height * o);
+                        ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+                        drawn = true;
+                        console.log('takePhoto OK', bmp.width + 'x' + bmp.height);
+                    } else {
+                        console.log('takePhoto orientation mismatch', bmp.width + 'x' + bmp.height, 'video', vw + 'x' + vh);
+                    }
+                    if (bmp.close) bmp.close();
+                }
+            } catch (e) { console.log('takePhoto failed, fallback to video frame', e); }
+            // ניסיון 2 (גיבוי): הפריים מהווידאו כמו קודם
+            if (!drawn) {
+                const out = Math.min(1, 2000 / Math.max(vw, vh));
+                canvas.width = Math.round(vw * out);
+                canvas.height = Math.round(vh * out);
+                ctx.drawImage(video, 0, 0, vw, vh, 0, 0, canvas.width, canvas.height);
+            }
             const base64Data = autoCropDocument(canvas).toDataURL('image/jpeg', 0.9).split(',')[1];
             closeCameraModal();
             cameraPages.push(base64Data);
