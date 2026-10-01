@@ -279,7 +279,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
                 return;
             }
             // מילוי המסך לאורך — inline כדי שיעבוד גם אם app.css ישן/במטמון
-            Object.assign(video.style, { width: '100%', height: 'auto', maxHeight: 'none', flex: '1 1 auto', minHeight: '0', objectFit: 'cover', background: '#000' });
+            Object.assign(video.style, { width: '100%', height: 'auto', maxHeight: 'none', flex: '1 1 auto', minHeight: '0', objectFit: 'contain', background: '#000' });
             video.style.opacity = '0';
             overlay.classList.remove('hidden');
             try {
@@ -443,13 +443,10 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
                 alert("המצלמה עדיין לא מוכנה, נסה שוב עוד רגע.");
                 return;
             }
-            // הצילום = בדיוק מה שנראה במסך (חיתוך לאורך, כמו object-fit: cover), בלי סיבוב.
+            // הצילום = כל הפריים שהמצלמה מחזירה (בלי חיתוך צדדים), בלי סיבוב.
             // כיווץ: מקסימום 2000 פיקסלים בצד הארוך, איכות 90%
             const vw = video.videoWidth, vh = video.videoHeight;
-            const bw = video.clientWidth || vw, bh = video.clientHeight || vh;
-            const fit = Math.max(bw / vw, bh / vh);
-            const sw = bw / fit, sh = bh / fit;
-            const sx = (vw - sw) / 2, sy = (vh - sh) / 2;
+            const sw = vw, sh = vh, sx = 0, sy = 0;
             const out = Math.min(1, 2000 / Math.max(sw, sh));
             canvas.width = Math.round(sw * out);
             canvas.height = Math.round(sh * out);
