@@ -1676,18 +1676,41 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
             } catch (e) { console.warn('שמירת העדפת תאריך נכשלה:', e); }
         }
 
+        // תאריך לא סביר = עתידי או ישן מעל שנה (חשבוניות לא נקראות כך - כמעט תמיד בלבול 4/6)
+        function isImplausibleDate(s) {
+            const p = dateProblem(s);
+            return p === 'future' || p === 'old';
+        }
+        // אם התאריך שנקרא לא סביר, ויש בדיוק תיקון אחד של 4<->6 שמביא אותו לחודש הנבחר - מתקנים אוטומטית ומסמנים
+        function autoFixImplausibleDate(parsed, meta) {
+            const d = parsed && parsed.invoiceDate;
+            if (!isValidIsoDate(d) || !isImplausibleDate(d)) return;
+            const cands = digitSwapSuggestions(d);
+            if (cands.length === 1) {
+                meta.dateAutoFrom = d;
+                parsed.invoiceDate = cands[0];
+            }
+        }
+
         function reconcileHeader(parsed, hdr) {
             const meta = { dateConflict: false, dateAlt: '', numberConflict: false, numberAlt: '', typeConflict: false };
-            if (!hdr) return meta;
+            if (!hdr) { autoFixImplausibleDate(parsed, meta); return meta; }
             const dA = isValidIsoDate(parsed.invoiceDate) ? parsed.invoiceDate : '';
             const dB = isValidIsoDate(hdr.invoiceDate) ? hdr.invoiceDate : '';
             if (dA && dB && dA !== dB) {
                 meta.dateConflict = true; meta.dateFull = dA; meta.dateHdr = dB;
                 const supKey = matchSupplier(parsed.supplier || hdr.supplier, parsed.taxId || hdr.taxId);
-                if (preferredDateSource(supKey) === 'full') { meta.dateAlt = dB; parsed.invoiceDate = dA; meta.datePrefApplied = true; }
+                const badA = isImplausibleDate(dA), badB = isImplausibleDate(dB);
+                if (badA !== badB) {
+                    // רק אחת הקריאות סבירה (לא עתידית / לא ישנה מעל שנה) - בוחרים אותה אוטומטית
+                    if (badB) { meta.dateAlt = dB; parsed.invoiceDate = dA; }
+                    else { meta.dateAlt = dA; parsed.invoiceDate = dB; }
+                }
+                else if (preferredDateSource(supKey) === 'full') { meta.dateAlt = dB; parsed.invoiceDate = dA; meta.datePrefApplied = true; }
                 else { meta.dateAlt = dA; parsed.invoiceDate = dB; if (preferredDateSource(supKey) === 'header') meta.datePrefApplied = true; }
             }
             else if (!dA && dB) parsed.invoiceDate = dB;
+            autoFixImplausibleDate(parsed, meta);
             const nA = String(parsed.invoiceNumber || '').trim();
             const nB = String(hdr.invoiceNumber || '').trim();
             if (nA && nB && nA !== nB) { meta.numberConflict = true; meta.numberAlt = nA; parsed.invoiceNumber = nB; }
@@ -1719,6 +1742,10 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
             const msgs = [];
             const sugg = [];
             const meta = currentScanMeta || {};
+            if (meta.dateAutoFrom && meta.dateAutoFrom !== v) {
+                msgs.push('התאריך תוקן אוטומטית (נקרא ' + fmtIsoDate(meta.dateAutoFrom) + ', בלבול 4/6) - בדוק מול התמונה.');
+                sugg.push(meta.dateAutoFrom);
+            }
             if (meta.dateConflict && meta.dateAlt && meta.dateAlt !== v) {
                 msgs.push('שתי קריאות של המסמך נתנו תאריכים שונים - בדוק מול התמונה.' + (meta.datePrefApplied ? ' (נבחרה הקריאה שבחרת בדרך כלל אצל ספק זה)' : ''));
                 sugg.push(meta.dateAlt);
