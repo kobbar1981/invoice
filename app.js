@@ -279,12 +279,12 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
                 return;
             }
             // מילוי המסך לאורך — inline כדי שיעבוד גם אם app.css ישן/במטמון
-            Object.assign(video.style, { width: '100%', height: 'auto', maxHeight: 'none', flex: '1 1 auto', minHeight: '0', objectFit: 'contain', background: '#000' });
+            Object.assign(video.style, { width: '100%', height: 'auto', maxHeight: 'none', flex: '1 1 auto', minHeight: '0', objectFit: 'cover', background: '#000' });
             video.style.opacity = '0';
             overlay.classList.remove('hidden');
             try {
                 cameraStream = await navigator.mediaDevices.getUserMedia({
-                    video: { facingMode: { ideal: "environment" }, aspectRatio: { ideal: (window.innerHeight >= window.innerWidth) ? 3 / 4 : 4 / 3 }, width: { ideal: (window.innerHeight >= window.innerWidth) ? 1536 : 2048 }, height: { ideal: (window.innerHeight >= window.innerWidth) ? 2048 : 1536 } },
+                    video: { facingMode: { ideal: "environment" }, aspectRatio: { ideal: window.innerWidth / window.innerHeight }, width: { ideal: (window.innerHeight >= window.innerWidth) ? 1440 : 2560 }, height: { ideal: (window.innerHeight >= window.innerWidth) ? 2560 : 1440 } },
                     audio: false
                 });
                 // זום מינימלי (אם המכשיר תומך, לפעמים זה עדשה רחבה) — כדי שלא יהיה צורך להתרחק
@@ -446,7 +446,11 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
             // הצילום = כל הפריים שהמצלמה מחזירה (בלי חיתוך צדדים), בלי סיבוב.
             // כיווץ: מקסימום 2000 פיקסלים בצד הארוך, איכות 90%
             const vw = video.videoWidth, vh = video.videoHeight;
-            const sw = vw, sh = vh, sx = 0, sy = 0;
+            // מצלמים בדיוק את מה שרואים על המסך (object-fit: cover) — מה שרואים = מה שמצולם
+            const dw = video.clientWidth || vw, dh = video.clientHeight || vh;
+            const cs = Math.max(dw / vw, dh / vh);
+            const sw = Math.min(vw, Math.round(dw / cs)), sh = Math.min(vh, Math.round(dh / cs));
+            const sx = Math.round((vw - sw) / 2), sy = Math.round((vh - sh) / 2);
             const out = Math.min(1, 2000 / Math.max(sw, sh));
             canvas.width = Math.round(sw * out);
             canvas.height = Math.round(sh * out);
