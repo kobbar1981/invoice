@@ -308,6 +308,128 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
             video.style.opacity = '0';
         };
 
+        // ---- חיתוך אוטומטי של המסמך: זיהוי דף בהיר על רקע כהה + יישור פרספקטיבה ----
+        // אם לא זוהה דף בביטחון — מחזיר את התמונה המקורית ללא שינוי.
+        function findDocumentQuad(rgba, w, h) {
+            const n = w * h, gray = new Uint8Array(n), hist = new Array(256).fill(0);
+            for (let i = 0, p = 0; i < n; i++, p += 4) {
+                const g = (rgba[p] * 299 + rgba[p + 1] * 587 + rgba[p + 2] * 114) / 1000 | 0;
+                gray[i] = g; hist[g]++;
+            }
+            // סף אוטומטי (Otsu)
+            let sum = 0; for (let t = 0; t < 256; t++) sum += t * hist[t];
+            let sumB = 0, wB = 0, best = -1, thr = 127;
+            for (let t = 0; t < 256; t++) {
+                wB += hist[t]; if (!wB) continue;
+                const wF = n - wB; if (!wF) break;
+                sumB += t * hist[t];
+                const mB = sumB / wB, mF = (sum - sumB) / wF;
+                const between = wB * wF * (mB - mF) * (mB - mF);
+                if (between > best) { best = between; thr = t; }
+            }
+            // הרכיב הבהיר הרציף הגדול ביותר
+            const label = new Int32Array(n), stack = new Int32Array(n);
+            let bestLabel = 0, bestSize = 0, cur = 0;
+            for (let s = 0; s < n; s++) {
+                if (label[s] || gray[s] <= thr) continue;
+                cur++; let sp = 0, size = 0; stack[sp++] = s; label[s] = cur;
+                while (sp) {
+                    const i = stack[--sp]; size++;
+                    const x = i % w, y = (i - x) / w;
+                    if (x > 0 && !label[i - 1] && gray[i - 1] > thr) { label[i - 1] = cur; stack[sp++] = i - 1; }
+                    if (x < w - 1 && !label[i + 1] && gray[i + 1] > thr) { label[i + 1] = cur; stack[sp++] = i + 1; }
+                    if (y > 0 && !label[i - w] && gray[i - w] > thr) { label[i - w] = cur; stack[sp++] = i - w; }
+                    if (y < h - 1 && !label[i + w] && gray[i + w] > thr) { label[i + w] = cur; stack[sp++] = i + w; }
+                }
+                if (size > bestSize) { bestSize = size; bestLabel = cur; }
+            }
+            if (!bestLabel || bestSize < n * 0.2 || bestSize > n * 0.97) return null;
+            // פינות: הנקודות הקיצוניות של הרכיב
+            let tl = null, br = null, tr = null, bl = null;
+            let minS = Infinity, maxS = -Infinity, minD = Infinity, maxD = -Infinity;
+            for (let i = 0; i < n; i++) {
+                if (label[i] !== bestLabel) continue;
+                const x = i % w, y = (i - x) / w, s = x + y, d = x - y;
+                if (s < minS) { minS = s; tl = [x, y]; }
+                if (s > maxS) { maxS = s; br = [x, y]; }
+                if (d > maxD) { maxD = d; tr = [x, y]; }
+                if (d < minD) { minD = d; bl = [x, y]; }
+            }
+            const q = [tl, tr, br, bl];
+            let area = 0;
+            for (let i = 0; i < 4; i++) { const a = q[i], b = q[(i + 1) % 4]; area += a[0] * b[1] - b[0] * a[1]; }
+            area = Math.abs(area) / 2;
+            // הצורה חייבת להיראות כמו דף: הרכיב ממלא את רוב המרובע, והמרובע לא כמעט כל התמונה
+            if (area < n * 0.2 || area > n * 0.97 || bestSize / area < 0.7) return null;
+            return q;
+        }
+
+        function autoCropDocument(src) {
+            try {
+                const W = src.width, H = src.height;
+                const sc = Math.min(1, 320 / Math.max(W, H));
+                const w = Math.max(8, Math.round(W * sc)), h = Math.max(8, Math.round(H * sc));
+                const sm = document.createElement('canvas'); sm.width = w; sm.height = h;
+                const sctx = sm.getContext('2d', { willReadFrequently: true });
+                sctx.drawImage(src, 0, 0, w, h);
+                const quad = findDocumentQuad(sctx.getImageData(0, 0, w, h).data, w, h);
+                if (!quad) return src;
+                // הגדלה חזרה לגודל המקורי + מרווח קטן החוצה כדי לא לגזור את קצה הדף
+                const cx = quad.reduce((a, p) => a + p[0], 0) / 4, cy = quad.reduce((a, p) => a + p[1], 0) / 4;
+                const P = quad.map(p => [
+                    Math.min(W - 1, Math.max(0, (cx + (p[0] - cx) * 1.015) / sc)),
+                    Math.min(H - 1, Math.max(0, (cy + (p[1] - cy) * 1.015) / sc))
+                ]);
+                const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+                let outW = Math.round(Math.max(dist(P[0], P[1]), dist(P[3], P[2])));
+                let outH = Math.round(Math.max(dist(P[0], P[3]), dist(P[1], P[2])));
+                if (outW < 200 || outH < 200) return src;
+                const cap = Math.min(1, 2000 / Math.max(outW, outH)); outW = Math.round(outW * cap); outH = Math.round(outH * cap);
+                const out = warpQuad(src.getContext('2d').getImageData(0, 0, W, H), P, outW, outH);
+                return out || src;
+            } catch (e) {
+                console.warn('autoCropDocument failed', e);
+                return src;
+            }
+        }
+
+        // העתקת מרובע (TL,TR,BR,BL) למלבן ישר, עם תיקון פרספקטיבה
+        function warpQuad(img, P, outW, outH) {
+            const W = img.width, H = img.height, sd = img.data;
+            const [x0, y0] = P[0], [x1, y1] = P[1], [x2, y2] = P[2], [x3, y3] = P[3];
+            const dx1 = x1 - x2, dx2 = x3 - x2, dx3 = x0 - x1 + x2 - x3;
+            const dy1 = y1 - y2, dy2 = y3 - y2, dy3 = y0 - y1 + y2 - y3;
+            let g = 0, hh = 0;
+            if (Math.abs(dx3) > 1e-9 || Math.abs(dy3) > 1e-9) {
+                const den = dx1 * dy2 - dx2 * dy1;
+                if (Math.abs(den) < 1e-9) return null;
+                g = (dx3 * dy2 - dx2 * dy3) / den;
+                hh = (dx1 * dy3 - dx3 * dy1) / den;
+            }
+            const a = x1 - x0 + g * x1, b = x3 - x0 + hh * x3, c = x0;
+            const d = y1 - y0 + g * y1, e = y3 - y0 + hh * y3, f = y0;
+            const out = document.createElement('canvas'); out.width = outW; out.height = outH;
+            const octx = out.getContext('2d');
+            const od = octx.createImageData(outW, outH), dd = od.data;
+            for (let j = 0; j < outH; j++) {
+                const v = j / (outH - 1);
+                for (let i = 0; i < outW; i++) {
+                    const u = i / (outW - 1), wd = g * u + hh * v + 1;
+                    let X = (a * u + b * v + c) / wd, Y = (d * u + e * v + f) / wd;
+                    X = X < 0 ? 0 : X > W - 1.001 ? W - 1.001 : X; Y = Y < 0 ? 0 : Y > H - 1.001 ? H - 1.001 : Y;
+                    const xi = X | 0, yi = Y | 0, fx = X - xi, fy = Y - yi;
+                    const p00 = (yi * W + xi) * 4, p10 = p00 + 4, p01 = p00 + W * 4, p11 = p01 + 4;
+                    const o = (j * outW + i) * 4;
+                    for (let k = 0; k < 3; k++) {
+                        dd[o + k] = (sd[p00 + k] * (1 - fx) + sd[p10 + k] * fx) * (1 - fy) + (sd[p01 + k] * (1 - fx) + sd[p11 + k] * fx) * fy;
+                    }
+                    dd[o + 3] = 255;
+                }
+            }
+            octx.putImageData(od, 0, 0);
+            return out;
+        }
+
         window.capturePhotoFromCamera = async function() {
             const video = document.getElementById('cameraModalVideo');
             const canvas = document.getElementById('cameraModalCanvas');
@@ -328,7 +450,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
             const ctx = canvas.getContext('2d');
             ctx.setTransform(1, 0, 0, 1, 0, 0);
             ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
-            const base64Data = canvas.toDataURL('image/jpeg', 0.9).split(',')[1];
+            const base64Data = autoCropDocument(canvas).toDataURL('image/jpeg', 0.9).split(',')[1];
             closeCameraModal();
             cameraPages.push(base64Data);
             const canAddPage = cameraPages.length < MAX_SCAN_PAGES - (appendingToScan ? currentScanPages.length : 0);
@@ -344,7 +466,128 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
             else await processScanPages(pagesToProcess);
         };
 
+        // ================= חשבוניות מהמייל (Gmail Apps Script, כמה חשבונות) =================
+        // כל חשבון Gmail מריץ את אותו סקריפט (gmail-invoices.gs) כ-Web App. כאן רק מושכים ממנו רשימה וקובץ,
+        // והקובץ נכנס לאותו זרם סריקה כמו "העלה קובץ" (כולל PDF), כך שהזיהוי והאישור זהים.
+        const MAIL_KEY = 'mail_sources_v1';   // שורה לכל חשבון: שם,כתובת,טוקן (נשמר רק במכשיר, לא בגיטהאב)
+        function loadMailSources() {
+            try {
+                return (localStorage.getItem(MAIL_KEY) || '').split('\n').map(l => l.trim()).filter(Boolean).map(l => {
+                    const p = l.split(',').map(x => x.trim());
+                    return { name: p[0], url: p[1], token: p[2] };
+                }).filter(s => s.name && s.url && s.token);
+            } catch (e) { return []; }
+        }
+        async function mailCall(src, params) {
+            const u = new URL(src.url);
+            u.searchParams.set('token', src.token);
+            Object.keys(params).forEach(k => u.searchParams.set(k, params[k]));
+            const r = await fetch(u.toString());
+            const data = await r.json();
+            if (data.error) throw new Error(data.error);
+            return data;
+        }
+        function mk(tag, css, text) {
+            const e = document.createElement(tag);
+            if (css) e.style.cssText = css;
+            if (text !== undefined) e.textContent = text;
+            return e;
+        }
+        function closeMailImport() {
+            const o = document.getElementById('mailImportOverlay');
+            if (o) o.remove();
+        }
+        async function scanMailItem(src, it) {
+            try {
+                const d = await mailCall(src, { action: 'get', id: it.id });
+                const bin = atob(d.data);
+                const bytes = new Uint8Array(bin.length);
+                for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+                const file = new File([bytes], d.name || 'invoice', { type: d.type || 'application/pdf' });
+                closeMailImport();
+                await handleScanFiles({ target: { files: [file], value: '' } }, 'invoice');
+                mailCall(src, { action: 'done', id: it.id }).catch(() => {});
+            } catch (e) {
+                alert('שגיאה בקבלת הקובץ מהמייל: ' + e.message);
+            }
+        }
+        function mailItemRow(src, it, row) {
+            const card = mk('div', 'border:1px solid #ddd; border-radius:10px; padding:10px; margin-bottom:8px; text-align:right;');
+            card.appendChild(mk('div', 'font-weight:bold; word-break:break-all;', it.name));
+            card.appendChild(mk('div', 'font-size:0.8em; color:#555; margin-top:2px;', (it.from || '') + (it.date ? ' · ' + new Date(it.date).toLocaleDateString('he-IL') : '')));
+            card.appendChild(mk('div', 'font-size:0.8em; color:#777; margin-bottom:8px;', it.subject || ''));
+            const btns = mk('div', 'display:flex; gap:8px;');
+            const scan = mk('button', 'flex:1; margin:0; background:#27ae60; color:#fff; border:none; border-radius:8px; padding:8px;', 'סרוק');
+            const skip = mk('button', 'flex:1; margin:0; background:#7f8c8d; color:#fff; border:none; border-radius:8px; padding:8px;', 'התעלם');
+            scan.onclick = () => { scan.disabled = skip.disabled = true; scan.textContent = '⏳'; scanMailItem(src, it); };
+            skip.onclick = async () => {
+                scan.disabled = skip.disabled = true;
+                try { await mailCall(src, { action: 'done', id: it.id }); card.remove(); }
+                catch (e) { alert('שגיאה: ' + e.message); scan.disabled = skip.disabled = false; }
+            };
+            btns.appendChild(scan); btns.appendChild(skip);
+            card.appendChild(btns);
+            return card;
+        }
+        async function refreshMailList(body) {
+            const sources = loadMailSources();
+            if (!sources.length) { renderMailSettings(body); return; }
+            body.replaceChildren(mk('p', 'text-align:center; color:#555;', '⏳ סורק את תיבות המייל...'));
+            const parts = await Promise.all(sources.map(s =>
+                mailCall(s, { action: 'list' }).then(d => ({ src: s, items: d.items || [] })).catch(e => ({ src: s, error: e.message }))));
+            body.replaceChildren();
+            parts.forEach(p => {
+                body.appendChild(mk('div', 'font-weight:bold; margin:12px 0 6px; text-align:right;', '📧 ' + p.src.name));
+                if (p.error) body.appendChild(mk('div', 'color:#c0392b; font-size:0.85em; text-align:right;', 'שגיאה: ' + p.error));
+                else if (!p.items.length) body.appendChild(mk('div', 'color:#777; font-size:0.85em; text-align:right;', 'אין חשבוניות חדשות'));
+                else p.items.forEach(it => body.appendChild(mailItemRow(p.src, it)));
+            });
+        }
+        function renderMailSettings(body) {
+            body.replaceChildren();
+            body.appendChild(mk('p', 'font-size:0.85em; color:#555; text-align:right; margin-top:0;', 'שורה לכל חשבון Gmail, בפורמט:\nשם,כתובת ה-Web App,טוקן'));
+            const ta = mk('textarea', 'width:100%; height:130px; box-sizing:border-box; direction:ltr; font-size:0.8em;');
+            try { ta.value = localStorage.getItem(MAIL_KEY) || ''; } catch (e) {}
+            body.appendChild(ta);
+            const save = mk('button', 'margin-top:8px; width:100%; background:#1877f2; color:#fff; border:none; border-radius:8px; padding:10px;', 'שמור וסרוק');
+            save.onclick = () => {
+                try { localStorage.setItem(MAIL_KEY, ta.value.trim()); } catch (e) {}
+                refreshMailList(body);
+            };
+            body.appendChild(save);
+        }
+        window.openMailImport = function () {
+            closeMailImport();
+            const ov = mk('div', 'position:fixed; inset:0; background:#fff; z-index:10000; display:flex; flex-direction:column;');
+            ov.id = 'mailImportOverlay';
+            const bar = mk('div', 'display:flex; align-items:center; gap:8px; padding:12px; border-bottom:1px solid #ddd; padding-top:calc(12px + env(safe-area-inset-top, 0px));');
+            bar.appendChild(mk('div', 'flex:1; font-weight:bold; font-size:1.1em; text-align:right;', '📧 חשבוניות מהמייל'));
+            const body = mk('div', 'flex:1; overflow-y:auto; padding:12px;');
+            const refresh = mk('button', 'margin:0; background:#eee; color:#333; border:none; border-radius:8px; padding:8px 10px;', '🔄');
+            const cog = mk('button', 'margin:0; background:#eee; color:#333; border:none; border-radius:8px; padding:8px 10px;', '⚙️');
+            const x = mk('button', 'margin:0; background:#eee; color:#333; border:none; border-radius:8px; padding:8px 10px;', '✕');
+            refresh.onclick = () => refreshMailList(body);
+            cog.onclick = () => renderMailSettings(body);
+            x.onclick = closeMailImport;
+            bar.appendChild(refresh); bar.appendChild(cog); bar.appendChild(x);
+            ov.appendChild(bar); ov.appendChild(body);
+            document.body.appendChild(ov);
+            refreshMailList(body);
+        };
+        function ensureMailImportTile() {
+            if (document.getElementById('mailImportTile')) return;
+            const first = document.querySelector('.upload-tile');
+            if (!first || !first.parentElement) return;
+            const b = document.createElement('button');
+            b.type = 'button'; b.id = 'mailImportTile'; b.className = 'upload-tile';
+            b.setAttribute('data-recognition-trigger', '');
+            b.onclick = () => window.openMailImport();
+            b.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z"/><polyline points="22,6 12,13 2,6"/></svg><span>ממייל</span>';
+            first.parentElement.appendChild(b);
+        }
+
         function initInvoicesModule() {
+            ensureMailImportTile();
             const monthInput = document.getElementById('invoiceMonthSelect');
             if (monthInput) {
                 monthInput.value = getCurrentMonthKey();
