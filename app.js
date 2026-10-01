@@ -1470,7 +1470,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
                 recognizedPageCount = allPages.length;
                 recognizedImageBase64 = await buildScanPreview(allPages);
                 document.getElementById('invoicePreviewImgWrap').innerHTML =
-                    `<div style="max-height:280px; overflow-y:auto; border:1px solid #ddd; border-radius:8px;"><img src="${recognizedImageBase64}" style="width:100%; display:block;"></div><div style="font-size:0.75em; color:#555; margin-top:2px;">${recognizedPageCount} עמודים - גלול לצפייה</div>`;
+                    `<div style="max-height:280px; overflow-y:auto; border:1px solid #ddd; border-radius:8px;"><a href="#" onclick="openScannedPreview(); return false;"><img src="${recognizedImageBase64}" style="width:100%; display:block;"></a></div><div style="font-size:0.75em; color:#555; margin-top:2px;">${recognizedPageCount} עמודים - לחץ להגדלה</div>`;
 
                 // פריטים: מאוחדים מכל העמודים
                 recognizedItemsList = Array.isArray(merged.items) ? merged.items : [];
@@ -1953,6 +1953,11 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
             if (retryScan) return processScanPages(pages);
         }
 
+        // פותח את החשבונית שנסרקה כרגע במסך מלא (נסגר בכפתור "סגור")
+        window.openScannedPreview = function() {
+            if (recognizedImageBase64 && window.openImageViewer) window.openImageViewer(recognizedImageBase64);
+        };
+
         function openInvoiceConfirmForm(recognized, existingInvoice = null, itemsMismatch = false) {
             const confirmForm = document.getElementById('invoiceConfirmForm');
             const imgWrap = document.getElementById('invoicePreviewImgWrap');
@@ -2020,8 +2025,8 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
 
                 imgWrap.innerHTML = recognizedImageBase64
                     ? (recognizedPageCount > 1
-                        ? `<div style="max-height:280px; overflow-y:auto; border:1px solid #ddd; border-radius:8px;"><img src="${recognizedImageBase64}" style="width:100%; display:block;"></div><div style="font-size:0.75em; color:#555; margin-top:2px;">${recognizedPageCount} עמודים - גלול לצפייה</div>`
-                        : `<img src="${recognizedImageBase64}" style="max-width:100%; max-height:220px; border-radius:8px; border:1px solid #ddd;">`)
+                        ? `<div style="max-height:280px; overflow-y:auto; border:1px solid #ddd; border-radius:8px;"><a href="#" onclick="openScannedPreview(); return false;"><img src="${recognizedImageBase64}" style="width:100%; display:block;"></a></div><div style="font-size:0.75em; color:#555; margin-top:2px;">${recognizedPageCount} עמודים - לחץ להגדלה</div>`
+                        : `<a href="#" onclick="openScannedPreview(); return false;"><img src="${recognizedImageBase64}" style="max-width:100%; max-height:220px; border-radius:8px; border:1px solid #ddd; cursor:zoom-in;"></a><div style="font-size:0.75em; color:#555; margin-top:2px;">לחץ להגדלה</div>`)
                     : '';
 
                 lastRecognizedSupplierRaw = (recognized && recognized.supplier) ? String(recognized.supplier) : '';
