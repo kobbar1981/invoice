@@ -283,20 +283,10 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
             video.style.opacity = '0';
             overlay.classList.remove('hidden');
             try {
-                // מבקש זרם לאורך (פורטרט) כשהמסך לאורך; אם המכשיר מחזיר זרם לרוחב — מנסה רזולוציות הפוכות
-                const wantPortrait = window.innerHeight >= window.innerWidth;
-                const sizes = wantPortrait ? [[1536, 2048], [2048, 1536], [1080, 1920]] : [[2048, 1536], [1536, 2048], [1920, 1080]];
-                for (const [w, h] of sizes) {
-                    const st = await navigator.mediaDevices.getUserMedia({
-                        video: { facingMode: { ideal: "environment" }, width: { ideal: w }, height: { ideal: h } },
-                        audio: false
-                    });
-                    const s = st.getVideoTracks()[0].getSettings();
-                    const ok = (s.height >= s.width) === wantPortrait;
-                    if (!cameraStream) { cameraStream = st; if (ok) break; continue; }
-                    if (ok) { cameraStream.getTracks().forEach(t => t.stop()); cameraStream = st; break; }
-                    st.getTracks().forEach(t => t.stop());
-                }
+                cameraStream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: { ideal: "environment" }, aspectRatio: { ideal: (window.innerHeight >= window.innerWidth) ? 3 / 4 : 4 / 3 }, width: { ideal: (window.innerHeight >= window.innerWidth) ? 1536 : 2048 }, height: { ideal: (window.innerHeight >= window.innerWidth) ? 2048 : 1536 } },
+                    audio: false
+                });
                 // זום מינימלי (אם המכשיר תומך, לפעמים זה עדשה רחבה) — כדי שלא יהיה צורך להתרחק
                 try {
                     const trk = cameraStream.getVideoTracks()[0];
